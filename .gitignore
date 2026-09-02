@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+
+.venv/
+venv/
+env/
+
+.env
+
+*.png
+
+yolov8n.pt
+
+.vscode/
+*.log

@@ -1,0 +1,1 @@
+"""G-ALERT Satellite Module"""

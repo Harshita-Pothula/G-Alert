@@ -1,0 +1,26 @@
+# Google Earth Engine
+earthengine-api==0.1.416
+
+# Data processing
+pandas==2.1.0
+numpy==1.24.3
+
+# Satellite/GIS
+rasterio==1.3.9
+geopandas==0.14.0
+
+# AI/ML
+ultralytics==8.2.0
+torch==2.0.0
+torchvision==0.15.0
+
+# Simulation
+PyArduino==0.6
+
+# Utilities
+python-dotenv==1.0.0
+requests==2.31.0
+
+# API/Backend
+Flask==3.0.0
+python-dateutil==2.8.2
