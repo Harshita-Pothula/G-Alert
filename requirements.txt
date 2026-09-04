@@ -15,7 +15,8 @@ torch==2.0.0
 torchvision==0.15.0
 
 # Simulation
-PyArduino==0.6
+# PyArduino removed - package not available on PyPI
+# Sensor simulation handled internally by simulation/sensor_simulator.py
 
 # Utilities
 python-dotenv==1.0.0
@@ -23,4 +24,5 @@ requests==2.31.0
 
 # API/Backend
 Flask==3.0.0
+flask-cors==4.0.0
 python-dateutil==2.8.2

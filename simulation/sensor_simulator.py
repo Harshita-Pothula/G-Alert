@@ -16,6 +16,7 @@ class SensorType(Enum):
     """Available sensor types."""
     VIBRATION = "vibration"
     WATER_LEVEL = "water_level"
+    RAINFALL = "rainfall"
     TEMPERATURE = "temperature"
     HUMIDITY = "humidity"
     PRESSURE = "pressure"
@@ -88,7 +89,10 @@ class VirtualSensor:
             "location": self.location,
             "value": self.last_reading["value"],
             "timestamp": self.last_reading["timestamp"].isoformat(),
-            "anomaly_factor": self.last_reading["anomaly_factor"]
+            "anomaly_factor": self.last_reading["anomaly_factor"],
+            "status": "ACTIVE",
+            "source": "virtual_sensor_simulation",
+            "simulated": True
         }
 
 
@@ -137,6 +141,28 @@ class WaterLevelSensor(VirtualSensor):
         self.normal_level = normal_level
 
 
+class RainfallSensor(VirtualSensor):
+    """Virtual rainfall sensor (simulated mm/hour)."""
+
+    def __init__(self, sensor_id, location, normal_rainfall=20.0):
+        """
+        Initialize rainfall sensor.
+
+        Args:
+            sensor_id: Sensor identifier
+            location: Installation location
+            normal_rainfall: Normal rainfall intensity in mm/hour
+        """
+        super().__init__(
+            sensor_id=sensor_id,
+            sensor_type=SensorType.RAINFALL,
+            location=location,
+            baseline_value=normal_rainfall,
+            noise_level=3.0
+        )
+        self.normal_rainfall = normal_rainfall
+
+
 class SensorNetwork:
     """Network of multiple virtual sensors."""
     
@@ -166,6 +192,12 @@ class SensorNetwork:
     def add_water_level_sensor(self, sensor_id, normal_level=150):
         """Convenience method to add water level sensor."""
         sensor = WaterLevelSensor(sensor_id, self.location, normal_level)
+        self.add_sensor(sensor)
+        return sensor
+
+    def add_rainfall_sensor(self, sensor_id, normal_rainfall=20.0):
+        """Convenience method to add rainfall sensor."""
+        sensor = RainfallSensor(sensor_id, self.location, normal_rainfall)
         self.add_sensor(sensor)
         return sensor
     

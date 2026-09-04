@@ -7,6 +7,16 @@ NDWI = (Green - NIR) / (Green + NIR)
 For Sentinel-2:
 - Green = B3
 - NIR = B8
+
+Note: NDWI threshold of 0.3 is a general water detection threshold from McFeeters (1996).
+For glacial lake monitoring, this threshold may not be optimal due to:
+- Snow/ice interference in high-altitude environments
+- Turbid water from glacial melt
+- Shadow effects in mountainous terrain
+
+This implementation uses the general threshold but acknowledges its limitations
+for Himalayan glacial lake applications. Future refinement should use region-specific
+calibration based on in-situ validation data.
 """
 
 import numpy as np
@@ -30,7 +40,13 @@ class NDWIAnalyzer:
         Args:
             ndwi_water_threshold: NDWI threshold for water detection
                                  (values > threshold = water)
-                                 Default 0.3 is demo threshold
+                                 Default 0.3 is general water detection threshold
+                                 from McFeeters (1996), not calibrated for
+                                 Himalayan glacial lakes
+        
+        Note: The default threshold is not scientifically validated for
+        high-altitude glacial lake environments. Future calibration should
+        use region-specific in-situ measurements.
         """
         self.ndwi_water_threshold = ndwi_water_threshold
         self.last_ndwi = None
@@ -147,24 +163,24 @@ class NDWIAnalyzer:
                 
                 ee_geometry = ee.Geometry(region_geometry)
                 
-                pixel_counts = water_mask.reduceRegion(
-                    reducer=ee.Reducer.sum(),
-                    geometry=ee_geometry,
-                    scale=30,
-                    maxPixels=10_000_000,
-                    bestEffort=True
+                pixel_area_image = ee.Image.pixelArea().updateMask(water_mask)
+
+                area_result = pixel_area_image.reduceRegion(
+                   reducer=ee.Reducer.sum(),
+                   geometry=ee_geometry,
+                   scale=30,
+                   maxPixels=10_000_000,
+                   bestEffort=True
                 ).getInfo()
-                pixel_count = next(iter(pixel_counts.values()), 0) if pixel_counts else 0
-                pixel_count = pixel_count or 0
+
+                area_sqm = next(iter(area_result.values()), 0) if area_result else 0
+                area_sqm = area_sqm or 0
                 
-                area_sqm = pixel_count * pixel_area_sqm
                 area_sqkm = area_sqm / 1e6
-                
+
                 self.last_lake_area = {
-                    "area_sqm": area_sqm,
-                    "area_sqkm": area_sqkm,
-                    "pixels": pixel_count,
-                    "pixel_area_sqm": pixel_area_sqm
+                 "area_sqm": area_sqm,
+                 "area_sqkm": area_sqkm
                 }
                 
                 print(f"✓ Water area calculated: {area_sqkm:.2f} km²")

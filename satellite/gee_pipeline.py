@@ -159,6 +159,141 @@ class Sentinel2Pipeline:
         except Exception as e:
             print(f"✗ Error retrieving Sentinel-2 image: {e}")
             return None
+
+    def get_sentinel2_image_with_fallback(self, region_geometry, start_date, end_date, 
+                                         cloud_cover_max=20, max_window_days=90):
+        """
+        Retrieve Sentinel-2 image with sliding window fallback for robust live demos.
+        
+        Strategy:
+        1. Try exact date range first
+        2. If no images, expand window by +7 days incrementally
+        3. Continue expanding until max_window_days or image found
+        4. Also try relaxing cloud cover requirements
+        
+        Args:
+            region_geometry: GeoJSON polygon for region of interest
+            start_date: Start date (string "YYYY-MM-DD" or datetime)
+            end_date: End date (string "YYYY-MM-DD" or datetime)
+            cloud_cover_max: Maximum cloud cover percentage (default 20%)
+            max_window_days: Maximum days to expand search window
+            
+        Returns:
+            tuple: (ee.Image object or None, search_metadata dict)
+        """
+        
+        # Convert strings to datetime if needed
+        if isinstance(start_date, str):
+            start_date = datetime.strptime(start_date, "%Y-%m-%d")
+        if isinstance(end_date, str):
+            end_date = datetime.strptime(end_date, "%Y-%m-%d")
+        
+        search_metadata = {
+            "original_range": f"{start_date.date()} to {end_date.date()}",
+            "attempts": [],
+            "final_range": None,
+            "cloud_cover_relaxed": False,
+            "fallback_used": False
+        }
+        
+        # Strategy 1: Try exact range with strict cloud cover
+        print(f"→ Attempt 1: Exact range {start_date.date()} to {end_date.date()}, cloud ≤ {cloud_cover_max}%")
+        image = self._try_date_range(region_geometry, start_date, end_date, cloud_cover_max)
+        search_metadata["attempts"].append({
+            "attempt": 1,
+            "range": f"{start_date.date()} to {end_date.date()}",
+            "cloud_cover": cloud_cover_max,
+            "result": "success" if image else "no_images"
+        })
+        
+        if image:
+            search_metadata["final_range"] = search_metadata["original_range"]
+            return image, search_metadata
+        
+        # Strategy 2: Sliding window expansion
+        window_increment = 7  # days
+        current_window = window_increment
+        
+        while current_window <= max_window_days:
+            expanded_start = start_date - timedelta(days=current_window)
+            expanded_end = end_date + timedelta(days=current_window)
+            
+            attempt_num = len(search_metadata["attempts"]) + 1
+            print(f"→ Attempt {attempt_num}: Expanded range ±{current_window} days ({expanded_start.date()} to {expanded_end.date()})")
+            
+            image = self._try_date_range(region_geometry, expanded_start, expanded_end, cloud_cover_max)
+            search_metadata["attempts"].append({
+                "attempt": attempt_num,
+                "range": f"{expanded_start.date()} to {expanded_end.date()}",
+                "cloud_cover": cloud_cover_max,
+                "window_expansion_days": current_window,
+                "result": "success" if image else "no_images"
+            })
+            
+            if image:
+                search_metadata["final_range"] = f"{expanded_start.date()} to {expanded_end.date()}"
+                search_metadata["fallback_used"] = True
+                return image, search_metadata
+            
+            current_window += window_increment
+        
+        # Strategy 3: Relax cloud cover requirements
+        relaxed_cloud_limits = [30, 40, 50, 60]
+        for cloud_limit in relaxed_cloud_limits:
+            attempt_num = len(search_metadata["attempts"]) + 1
+            max_end = end_date + timedelta(days=max_window_days)
+            max_start = start_date - timedelta(days=max_window_days)
+            
+            print(f"→ Attempt {attempt_num}: Relaxed cloud cover to {cloud_limit}%")
+            
+            image = self._try_date_range(region_geometry, max_start, max_end, cloud_limit)
+            search_metadata["attempts"].append({
+                "attempt": attempt_num,
+                "range": f"{max_start.date()} to {max_end.date()}",
+                "cloud_cover": cloud_limit,
+                "cloud_cover_relaxed": True,
+                "result": "success" if image else "no_images"
+            })
+            
+            if image:
+                search_metadata["final_range"] = f"{max_start.date()} to {max_end.date()}"
+                search_metadata["cloud_cover_relaxed"] = True
+                search_metadata["fallback_used"] = True
+                return image, search_metadata
+        
+        # All strategies failed
+        print(f"✗ No suitable imagery found after {len(search_metadata['attempts'])} attempts")
+        return None, search_metadata
+
+    def _try_date_range(self, region_geometry, start_date, end_date, cloud_cover_max):
+        """Helper method to try a specific date range."""
+        try:
+            ee_geometry = ee.Geometry(region_geometry)
+            
+            collection = (
+                ee.ImageCollection(self.COLLECTION)
+                .filterBounds(ee_geometry)
+                .filterDate(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+                .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", cloud_cover_max))
+                .sort("CLOUDY_PIXEL_PERCENTAGE")
+            )
+            
+            if collection.size().getInfo() == 0:
+                return None
+            
+            image = collection.first()
+            metadata = image.getInfo()
+            self.last_image = image
+            self.last_metadata = metadata
+            
+            print(f"✓ Retrieved image from {metadata['properties']['system:index']}")
+            print(f"  Cloud cover: {metadata['properties']['CLOUDY_PIXEL_PERCENTAGE']}%")
+            
+            return image
+            
+        except Exception as e:
+            print(f"✗ Error in date range attempt: {e}")
+            return None
     
     def download_image_data(self, image, region_geometry, scale=30):
         """

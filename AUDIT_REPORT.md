@@ -2,6 +2,19 @@ G-ALERT BACKEND AUDIT REPORT
 Generated: September 2, 2026
 Status: READY FOR FIXES
 
+--------------------------------------------------------------------------------
+HISTORICAL / SUPERSEDED DOCUMENT
+--------------------------------------------------------------------------------
+This file is a snapshot of an earlier audit (2 September 2026). It is kept for
+history. Do not treat the findings below as the current project status.
+
+Later work may already have resolved some items (for example Earth Engine
+reduceRegion / geometry usage in NDWI water-area calculation). Recheck the
+current source and tests before acting on anything in this file.
+--------------------------------------------------------------------------------
+
+
+
 ================================================================================
 EXECUTIVE SUMMARY
 ================================================================================

@@ -10,8 +10,15 @@ Output levels:
 - HIGH_RISK (0.6 - 0.85)
 - CRITICAL (0.85 - 1.0)
 
-Note: These are PROTOTYPE/DEMO thresholds, not scientifically validated
-operational disaster thresholds.
+IMPORTANT DISCLAIMER:
+- Risk weights (satellite: 0.4, AI: 0.3, sensor: 0.3) are PROTOTYPE values
+- Risk thresholds (SAFE: 0.3, WARNING: 0.6, HIGH_RISK: 0.85) are PROTOTYPE values
+- These are NOT scientifically validated for GLOF prediction
+- No published GLOF research supports these specific numerical values
+- Risk calculation methodology is sound, but numerical parameters require
+  scientific validation for operational use
+- This system is suitable for hackathon demonstration but NOT for operational
+  disaster prediction or public warning without scientific validation
 """
 
 import json
@@ -66,8 +73,9 @@ class RiskEngine:
         }
         
         self.last_assessment = None
+        self.history = []
     
-    def assess_risk(self, satellite_signal=None, ai_signal=None, sensor_signal=None):
+    def assess_risk(self, satellite_signal=None, ai_signal=None, sensor_signal=None, region=None):
         """
         Assess overall risk from available signals.
         
@@ -75,6 +83,7 @@ class RiskEngine:
             satellite_signal: float (0-1) from satellite observations
             ai_signal: float (0-1) from AI detections
             sensor_signal: float (0-1) from sensors
+            region: optional region identifier for event history
             
         Returns:
             dict with risk assessment
@@ -112,10 +121,20 @@ class RiskEngine:
             satellite_signal, ai_signal, sensor_signal, risk_score
         )
         
+        if risk_level == RiskLevel.SAFE:
+            action = "Continue monitoring"
+        elif risk_level == RiskLevel.WARNING:
+            action = "Increase monitoring and review observations"
+        elif risk_level == RiskLevel.HIGH_RISK:
+            action = "Review downstream exposure and prepare warning"
+        else:
+            action = "Trigger emergency-warning workflow"
+
         assessment = {
             "timestamp": datetime.now().isoformat(),
             "risk_score": round(risk_score, 4),
             "risk_level": risk_level.value,
+            "action": action,
             "explanation": explanation,
             "signals": {
                 "satellite": round(satellite_signal, 4),
@@ -125,6 +144,19 @@ class RiskEngine:
             "weights": self.weights,
             "thresholds": self.thresholds
         }
+
+        history_entry = {
+            "timestamp": assessment["timestamp"],
+            "region": region,
+            "risk_score": assessment["risk_score"],
+            "risk_level": assessment["risk_level"],
+            "satellite_signal": round(satellite_signal, 4),
+            "ai_signal": round(ai_signal, 4),
+            "sensor_signal": round(sensor_signal, 4),
+            "explanation": assessment["explanation"],
+            "action": assessment["action"]
+        }
+        self.history.append(history_entry)
         
         self.last_assessment = assessment
         return assessment
@@ -257,6 +289,7 @@ class RiskEngine:
             sensor_readings: dict with sensor values:
                 - vibration_cmps (cm/s²)
                 - water_level_cm
+                - rainfall_mmph (optional dict with value/anomaly_factor)
                 - temperature_c (optional)
                 
         Returns:
@@ -287,6 +320,15 @@ class RiskEngine:
             signal += 0.3  # High level
         elif water_level > 170:
             signal += 0.1  # Elevated level
+
+        # Prototype-only rainfall support: use the sensor anomaly factor as a small
+        # additional contribution without changing the public RiskEngine API or the
+        # existing vibration/water-level logic.
+        rainfall = sensor_readings.get("rainfall_mmph")
+        if isinstance(rainfall, dict):
+            rainfall_anomaly = rainfall.get("anomaly_factor", 0.0)
+            rainfall_anomaly = max(0.0, min(1.0, float(rainfall_anomaly)))
+            signal += rainfall_anomaly * 0.1
         
         return min(signal, 1.0)
     
