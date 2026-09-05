@@ -13,9 +13,15 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from satellite.region_config import HIMALAYAN_REGIONS, get_region_info
-from main import run_integrated_monitoring, run_nepal_simulation_sequence
+from main import (
+    run_integrated_monitoring,
+    run_nepal_simulation_sequence,
+    run_temporal_evidence,
+    run_tsho_rolpa_temporal_evidence,
+)
 from simulation.sensor_simulator import SensorNetwork
 from risk_engine import RiskEngine
+from observation_store import ObservationStore
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend consumption
@@ -23,6 +29,16 @@ CORS(app)  # Enable CORS for frontend consumption
 # Configuration
 app.config['JSON_SORT_KEYS'] = False
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
+
+
+def _validated_signal(data, name, default):
+    """Return a numeric signal in the inclusive 0-1 range."""
+    value = data.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number between 0 and 1")
+    if not 0 <= value <= 1:
+        raise ValueError(f"{name} must be a number between 0 and 1")
+    return float(value)
 
 
 # ============================================================================
@@ -115,6 +131,9 @@ def monitor_region(region_key):
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
     mode = request.args.get('mode', 'monitoring')
+
+    if mode not in {'monitoring', 'simulation'}:
+        return jsonify({"status": "error", "error": "mode must be monitoring or simulation"}), 400
     
     try:
         observation = run_integrated_monitoring(
@@ -160,12 +179,15 @@ def monitor_multiple_regions():
     end_date = data.get('end_date')
     mode = data.get('mode', 'monitoring')
     
-    if not region_keys:
+    if not isinstance(region_keys, list) or not region_keys or len(region_keys) > 10:
         return jsonify({
             "status": "error",
-            "error": "No regions specified",
+            "error": "regions must be a non-empty list of at most 10 region keys",
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }), 400
+
+    if mode not in {'monitoring', 'simulation'}:
+        return jsonify({"status": "error", "error": "mode must be monitoring or simulation"}), 400
     
     results = []
     errors = []
@@ -198,6 +220,116 @@ def monitor_multiple_regions():
         "failed_analyses": len(errors),
         "results": results,
         "errors": errors
+    })
+
+
+@app.route('/api/observations/<region_key>', methods=['GET'])
+def get_observation_history(region_key):
+    """Return persisted monitoring observations for one configured region."""
+    if get_region_info(region_key) is None:
+        return jsonify({"status": "error", "error": f"Region '{region_key}' not found"}), 404
+    limit = request.args.get('limit', default=50, type=int)
+    try:
+        observations = ObservationStore().list(region_key, limit)
+    except ValueError as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 400
+    return jsonify({
+        "status": "success",
+        "region": region_key,
+        "count": len(observations),
+        "observations": observations,
+    })
+
+
+@app.route('/api/observations/<region_key>/temporal', methods=['GET'])
+def get_temporal_observation_history(region_key):
+    """Return persisted multi-date evidence runs for one configured region."""
+    if get_region_info(region_key) is None:
+        return jsonify({"status": "error", "error": f"Region '{region_key}' not found"}), 404
+    limit = request.args.get('limit', default=20, type=int)
+    try:
+        runs = ObservationStore().list_temporal_evidence(region_key, limit)
+    except ValueError as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 400
+    return jsonify({
+        "status": "success",
+        "region": region_key,
+        "count": len(runs),
+        "temporal_evidence_runs": runs,
+    })
+
+
+@app.route('/api/monitor/Tsho_Rolpa_Nepal/temporal', methods=['GET'])
+def monitor_tsho_rolpa_temporal():
+    """Evaluate multi-date satellite candidate consistency for Tsho Rolpa."""
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    max_observations = request.args.get('max_observations', default=6, type=int)
+    try:
+        result = run_tsho_rolpa_temporal_evidence(start_date, end_date, max_observations)
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 400
+    except Exception:
+        return jsonify({"status": "error", "error": "Temporal monitoring failed"}), 500
+
+
+@app.route('/api/monitor/<region_key>/temporal', methods=['GET'])
+def monitor_region_temporal(region_key):
+    """Evaluate multi-date satellite candidate consistency for any configured region."""
+    if get_region_info(region_key) is None:
+        return jsonify({
+            "status": "error",
+            "error": f"Region '{region_key}' not found",
+        }), 404
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    max_observations = request.args.get('max_observations', default=6, type=int)
+    try:
+        return jsonify(run_temporal_evidence(
+            region_key, start_date, end_date, max_observations
+        ))
+    except ValueError as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 400
+    except Exception:
+        return jsonify({"status": "error", "error": "Temporal monitoring failed"}), 500
+
+
+@app.route('/api/monitor/multi/temporal', methods=['POST'])
+def monitor_multiple_regions_temporal():
+    """Run the reusable real-satellite temporal workflow for several regions."""
+    data = request.get_json() or {}
+    region_keys = data.get("regions", [])
+    if not isinstance(region_keys, list) or not region_keys or len(region_keys) > 10:
+        return jsonify({
+            "status": "error",
+            "error": "regions must be a non-empty list of at most 10 region keys",
+        }), 400
+    start_date = data.get("start_date")
+    end_date = data.get("end_date")
+    max_observations = data.get("max_observations", 6)
+    if not isinstance(max_observations, int):
+        return jsonify({"status": "error", "error": "max_observations must be an integer"}), 400
+    results = []
+    errors = []
+    for region_key in region_keys:
+        if get_region_info(region_key) is None:
+            errors.append({"region": region_key, "error": "Region not found"})
+            continue
+        try:
+            results.append(run_temporal_evidence(
+                region_key, start_date, end_date, max_observations
+            ))
+        except Exception as exc:
+            errors.append({"region": region_key, "error": str(exc)})
+    return jsonify({
+        "status": "success",
+        "data_source": "LIVE_SENTINEL2",
+        "requested_regions": len(region_keys),
+        "successful_analyses": len(results),
+        "failed_analyses": len(errors),
+        "results": results,
+        "errors": errors,
     })
 
 
@@ -272,9 +404,12 @@ def demo_risk_engine():
     engine = RiskEngine()
     
     # Use provided values or defaults
-    satellite_signal = data.get('satellite_signal', 0.1)
-    ai_signal = data.get('ai_signal', 0.05)
-    sensor_signal = data.get('sensor_signal', 0.15)
+    try:
+        satellite_signal = _validated_signal(data, 'satellite_signal', 0.1)
+        ai_signal = _validated_signal(data, 'ai_signal', 0.05)
+        sensor_signal = _validated_signal(data, 'sensor_signal', 0.15)
+    except ValueError as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 400
     
     assessment = engine.assess_risk(
         satellite_signal=satellite_signal,
@@ -372,4 +507,4 @@ if __name__ == '__main__':
     print("  GET  /api/simulation/nepal-flood")
     print("="*60 + "\n")
     
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=False)

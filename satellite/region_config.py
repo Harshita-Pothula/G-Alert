@@ -36,6 +36,8 @@ HIMALAYAN_REGIONS = {
         "description": "Representative monitoring region for documented glacial lakes in the Langtang Valley.",
         "hazard_level": "HIGH",
         "reference": "ICIMOD Himalayan glacial lake inventories"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Regional center and analysis buffer; authoritative lake polygon not bundled"
     },
     
     # ========== NEPAL ==========
@@ -64,6 +66,8 @@ HIMALAYAN_REGIONS = {
             "reference": "UN GLOF monitoring database; WECS Nepal 1996 report; ICIMOD 2001"
         },
         "reference": "UN GLOF monitoring database; WECS Nepal 1996 report; ICIMOD 2001"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "ICIMOD 2001 center reference; authoritative lake polygon not bundled"
     },
     
     "Imja_Tsho_Nepal": {
@@ -89,6 +93,8 @@ HIMALAYAN_REGIONS = {
             "reference": "WECS Nepal 1996; ICIMOD 2001; Khumbu Valley monitoring"
         },
         "reference": "WECS Nepal 1996; ICIMOD 2001; Khumbu Valley monitoring"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "NASA Earth Observatory 2016 / ICIMOD center reference; authoritative lake polygon not bundled"
     },
     
     "Dig_Tsho_Nepal": {
@@ -114,6 +120,8 @@ HIMALAYAN_REGIONS = {
             "reference": "Historic 1985 GLOF; Nepal disaster records"
         },
         "reference": "Historic 1985 GLOF; Nepal disaster records"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Regional center and analysis buffer; authoritative lake polygon not bundled"
     },
     
     "Thulagi_Nepal": {
@@ -139,6 +147,8 @@ HIMALAYAN_REGIONS = {
             "reference": "BGR/NLfB/GGA 2011 study; ICIMOD 2001"
         },
         "reference": "BGR/NLfB/GGA 2011 study; ICIMOD 2001"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Regional center and analysis buffer; authoritative lake polygon not bundled"
     },
     
     # ========== BHUTAN ==========
@@ -167,6 +177,8 @@ HIMALAYAN_REGIONS = {
             "reference": "2001 emergency intervention; Bhutan GLOF study"
         },
         "reference": "2001 emergency intervention; Bhutan GLOF study"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Bhutan GLOF study center reference; authoritative lake polygon not bundled"
     },
     
     "Raphstreng_Tsho_Bhutan": {
@@ -192,6 +204,8 @@ HIMALAYAN_REGIONS = {
             "reference": "Bhutan glacial hazards study; 2674 lakes inventory"
         },
         "reference": "Bhutan glacial hazards study; 2674 lakes inventory"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Regional center and analysis buffer; authoritative lake polygon not bundled"
     },
     
     # ========== TIBET / CHINA ==========
@@ -220,6 +234,8 @@ HIMALAYAN_REGIONS = {
             "reference": "Tibet Hydrological Department 2006; Wang et al. 2008 study"
         },
         "reference": "Tibet Hydrological Department 2006; Wang et al. 2008 study"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Wang et al. 2008 center reference; authoritative lake polygon not bundled"
     },
     
     "Shaksgam_Karakoram": {
@@ -245,6 +261,8 @@ HIMALAYAN_REGIONS = {
             "reference": "Hewitt 1982; USGS historical records; Karakoram monitoring"
         },
         "reference": "Hewitt 1982; USGS historical records; Karakoram monitoring"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Regional center and analysis buffer; authoritative lake polygon not bundled"
     },
     
     # ========== INDIA (HIMALAYAN STATES) ==========
@@ -272,6 +290,8 @@ HIMALAYAN_REGIONS = {
             "reference": "2013 North India floods; India disaster records"
         },
         "reference": "2013 North India floods; India disaster records"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Regional center and analysis buffer; authoritative lake polygon not bundled"
     }
 }
 
@@ -409,6 +429,48 @@ def get_region_analysis_bounds(region_key):
         }
     }    
 
+
+def get_lake_geometry(region_key):
+    """Return the best configured geometry without upgrading its trust level."""
+    region = HIMALAYAN_REGIONS.get(region_key)
+    if not region:
+        return None, {"status": "UNKNOWN", "source": None, "geometry_type": "NONE"}
+
+    configured_geometry = region.get("lake_geometry")
+    if configured_geometry is not None:
+        return configured_geometry, {
+            "status": region.get("geometry_status", "UNKNOWN"),
+            "source": region.get("geometry_source"),
+            "geometry_type": "LAKE_POLYGON",
+        }
+
+    return get_region_analysis_bounds(region_key), {
+        "status": region.get("geometry_status", "UNKNOWN"),
+        "source": region.get("geometry_source"),
+        "geometry_type": "APPROXIMATE_ANALYSIS_ROI",
+    }
+
+
+def get_authoritative_reference(region_key):
+    """Return an optional trusted reference geometry without inventing one."""
+    region = HIMALAYAN_REGIONS.get(region_key)
+    if not region:
+        return None, {
+            "status": "UNAVAILABLE",
+            "trust_status": "UNTRUSTED",
+            "source": None,
+        }
+    geometry = region.get("authoritative_geometry")
+    metadata = region.get("authoritative_geometry_metadata")
+    if not isinstance(geometry, dict) or not isinstance(metadata, dict):
+        return None, {
+            "status": "UNAVAILABLE",
+            "trust_status": "UNTRUSTED",
+            "source": None,
+            "reason": "No verified authoritative reference geometry is configured",
+        }
+    return geometry, metadata
+
 def get_all_regions():
     """Return all available monitoring regions."""
     return HIMALAYAN_REGIONS
@@ -478,17 +540,19 @@ def get_monitoring_metadata():
     """
     
     regions = HIMALAYAN_REGIONS
+    numeric_population_values = [
+        region.get("population_at_risk")
+        for region in regions.values()
+        if isinstance(region.get("population_at_risk"), int)
+        and region.get("population_at_risk") >= 0
+    ]
     
     return {
         "total_regions": len(regions),
         "countries_covered": list(set(r["country"] for r in regions.values())),
         "critical_sites": len([r for r in regions.values() if r.get("hazard_level") == "CRITICAL"]),
         "high_risk_sites": len([r for r in regions.values() if r.get("hazard_level") == "HIGH"]),
-        "total_people_at_risk": sum(
-            int(r.get("population_at_risk", "0").split("+")[-1].replace(" ", ""))
-            for r in regions.values()
-            if isinstance(r.get("population_at_risk"), str)
-        ),
+        "total_people_at_risk": sum(numeric_population_values) if numeric_population_values else None,
         "reference_sources": [
             "UN GLOF monitoring database",
             "WECS Nepal reports",

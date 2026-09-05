@@ -22,5 +22,13 @@
     "cached_at": "2026-09-04T17:27:48.676705",
     "file_size_bytes": 148197,
     "original_url": "https://earthengine.googleapis.com/v1/projects/g-alert-507210/thumbnails/718c81ceea922d52ea5e5e48aac5fba4-b3da70e654a4e7c63f36c3616967660c:getPixels"
+  },
+  "c1acfd5ceed38649ae32d26e05ac0d54": {
+    "region_key": "Tsho_Rolpa_Nepal",
+    "image_id": "20260526T044659_20260526T045305_T45RVL",
+    "band_config": "rgb",
+    "cached_at": "2026-09-04T19:42:24.191385",
+    "file_size_bytes": 503109,
+    "original_url": "https://earthengine.googleapis.com/v1/projects/g-alert-507210/thumbnails/0096925f22db102f2e91cc484830f0ad-d98b4404686289fbfd80a51f5a140fc6:getPixels"
   }
 }

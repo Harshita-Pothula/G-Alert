@@ -1,0 +1,115 @@
+G-ALERT SCL MASKING TASK � VERIFICATION REPORT
+(all results below are actual execution results; nothing is fabricated)
+
+======================================================================
+STEP: 1. Compile check
+======================================================================
+  compile OK: main.py
+  compile OK: app.py
+  compile OK: satellite/ndwi_analysis.py
+  compile OK: satellite/gee_pipeline.py
+[RESULT] 1. Compile check: all files compile
+
+======================================================================
+STEP: 2. Import + SCL constant check
+======================================================================
+  SCL_CONTAMINATION_CLASSES = {3: 'cloud_shadow', 8: 'cloud_medium_probability', 9: 'cloud_high_probability', 10: 'thin_cirrus', 11: 'snow_ice'}
+  main.py and app.py import cleanly
+[RESULT] 2. Import + SCL constant check: imports OK
+
+======================================================================
+STEP: 3. apply_quality_mask unit check (non-EE path)
+======================================================================
+[FAILED] 3. apply_quality_mask unit check (non-EE path): name 'NDWIAnalyzer' is not defined
+Traceback (most recent call last):
+  File "C:\Users\Admin\Desktop\G-ALERT-backend\verify_masking_task.py", line 41, in run_step
+    result = fn()
+             ^^^^
+  File "C:\Users\Admin\Desktop\G-ALERT-backend\verify_masking_task.py", line 70, in step_unit_masking
+    analyzer = NDWIAnalyzer()
+               ^^^^^^^^^^^^
+NameError: name 'NDWIAnalyzer' is not defined
+
+
+======================================================================
+STEP: 4. Offline contract tests
+======================================================================
+  offline test results: {'phase1_integrated_test.py': 'PASS', 'phase2_nepal_test.py': 'PASS', 'risk_engine_test.py': 'PASS'}
+[RESULT] 4. Offline contract tests: {'phase1_integrated_test.py': 'PASS', 'phase2_nepal_test.py': 'PASS', 'risk_engine_test.py': 'PASS'}
+
+======================================================================
+STEP: 5. LIVE GEE end-to-end (real Sentinel-2)
+======================================================================
+  console output from run_integrated_monitoring (verbatim):
+    | 
+    | === Initializing G-ALERT Satellite Pipeline ===
+    | Connecting to Google Earth Engine...
+    | ✓ GEE authenticated via user account
+    | ✓ Satellite pipeline ready
+    | 
+    | → Attempt 1: Exact range 2026-08-05 to 2026-09-05, cloud ≤ 20%
+    | ✓ Retrieved image from 20260811T045241_20260811T045240_T45RUL
+    |   Cloud cover: 13.369124%
+    | ✓ NDWI calculated from EE Image
+    | ✓ Water mask created (threshold: 0.3)
+    | ✓ Water area calculated: 0.00 km²
+    | ✓ Using cached image: 7f54dcfb85acb7ae5bc50a3146ebcdf2.png
+    | ✓ YOLOv8 model loaded: yolov8n.pt
+    | ✓ Detection complete: 0 objects found
+  observation.status = SUCCESS
+  image_id           = 20260811T045241_20260811T045240_T45RUL
+  acquisition_time   = 2026-08-11T05:01:24.426000+00:00
+  cloud_cover_pct    = 13.369124
+  ndwi_value (mean)  = None
+  ndwi_threshold     = {'value': 0.3, 'validated': False, 'note': 'Generic McFeeters (1996) water threshold; NOT calibrated for Himalayan glacial lakes'}
+  water_area         = {'area_sqm': 0, 'area_sqkm': 0.0, 'pixel_area_source': 'ee.Image.pixelArea() (projection-derived)'}
+  quality_masking    = {
+  "status": "APPLIED",
+  "method": "Sentinel-2 SCL (Scene Classification Layer, band 'SCL')",
+  "excluded_classes": {
+    "3": "cloud_shadow",
+    "8": "cloud_medium_probability",
+    "9": "cloud_high_probability",
+    "10": "thin_cirrus",
+    "11": "snow_ice"
+  },
+  "note": "SCL classes come from the Sen2Cor classification in the Sentinel-2 Level-2A product. Masking removes gross cloud, cloud-shadow, cirrus, and snow/ice contamination; it does not guarantee that all remaining NDWI-positive pixels are water (terrain shadow and turbid water remain known limitations).",
+  "valid_pixel_fraction": null,
+  "masked_pixel_fractions": {
+    "cloud_high_probability": null,
+    "cloud_medium_probability": null,
+    "cloud_shadow": null,
+    "snow_ice": null,
+    "thin_cirrus": null
+  }
+}
+  baseline status    = NOT_AVAILABLE
+  baseline qm status = None
+  data_quality       = {
+  "confidence": 0.0,
+  "cloud_confidence": 0.86630876,
+  "current_cloud_cover_percent": 13.369124,
+  "baseline_cloud_cover_percent": null,
+  "current_water_area_valid": true,
+  "baseline_water_area_valid": false,
+  "comparison_status": "NOT_AVAILABLE",
+  "quality_mask_status": "APPLIED",
+  "valid_pixel_fraction": null
+}
+  risk_level         = SAFE (score=0.0)
+[RESULT] 5. LIVE GEE end-to-end (real Sentinel-2): {'status': 'SUCCESS', 'quality_masking': 'APPLIED', 'valid_pixel_fraction': None, 'water_area_sqkm': 0.0}
+
+======================================================================
+STEP: 6. API endpoint smoke check
+======================================================================
+  GET /api/health -> HTTP 200, status=healthy
+  GET /api/regions -> HTTP 200, status=success
+  GET /api/regions/Tsho_Rolpa_Nepal -> HTTP 200, status=success
+  POST /api/demo/risk-engine -> HTTP 200, level=SAFE
+[RESULT] 6. API endpoint smoke check: API smoke checks done
+
+======================================================================
+END OF REPORT
+======================================================================
+
+Report written to masking_verification_report.txt

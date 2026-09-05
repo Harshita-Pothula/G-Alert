@@ -24,7 +24,6 @@ IMPORTANT DISCLAIMER:
 import json
 from datetime import datetime
 from enum import Enum
-from typing import Dict, Any, Optional, List
 
 
 class RiskLevel(Enum):
@@ -33,6 +32,12 @@ class RiskLevel(Enum):
     WARNING = "WARNING"
     HIGH_RISK = "HIGH_RISK"
     CRITICAL = "CRITICAL"
+
+
+ASSESSMENT_META_FLAG = (
+    "This assessment is for decision support only and is not a scientifically "
+    "validated GLOF probability model."
+)
 
 
 class RiskEngine:
@@ -75,7 +80,14 @@ class RiskEngine:
         self.last_assessment = None
         self.history = []
     
-    def assess_risk(self, satellite_signal=None, ai_signal=None, sensor_signal=None, region=None):
+    def assess_risk(
+        self,
+        satellite_signal=None,
+        ai_signal=None,
+        sensor_signal=None,
+        region=None,
+        evidence=None,
+    ):
         """
         Assess overall risk from available signals.
         
@@ -84,12 +96,49 @@ class RiskEngine:
             ai_signal: float (0-1) from AI detections
             sensor_signal: float (0-1) from sensors
             region: optional region identifier for event history
+            evidence: optional JSON-safe evidence context with the keys
+                ``observed_evidence``, ``derived_indicators``, ``assumptions``,
+                ``simulated_signals``, and ``unavailable_information``
             
         Returns:
             dict with risk assessment
         """
         
-        # Handle None values (data not available)
+        evidence = evidence or {}
+        if not isinstance(evidence, dict):
+            raise ValueError("evidence must be a dictionary when provided")
+
+        missing_inputs = [
+            name for name, value in (
+                ("satellite", satellite_signal),
+                ("ai", ai_signal),
+                ("sensor", sensor_signal),
+            ) if value is None
+        ]
+
+        observed_evidence = evidence.get("observed_evidence", [])
+        supplied_derived_indicators = evidence.get("derived_indicators", [])
+        assumptions = evidence.get("assumptions", [])
+        simulated_signals = evidence.get("simulated_signals", [])
+        supplied_unavailable_information = evidence.get("unavailable_information", [])
+        if supplied_unavailable_information is None:
+            supplied_unavailable_information = []
+        if not isinstance(supplied_unavailable_information, list):
+            raise ValueError("unavailable_information must be a list when provided")
+        unavailable_information = list(supplied_unavailable_information)
+        unavailable_information.extend(
+            f"{name} signal was not supplied" for name in missing_inputs
+        )
+
+        if not isinstance(assumptions, list):
+            assumptions = [assumptions]
+        assumptions = list(assumptions) + [
+            "Signal weights and risk thresholds are prototype parameters",
+            "Numeric inputs are bounded indicators, not direct GLOF probabilities",
+        ]
+
+        # Keep the legacy numeric score bounded, but expose missing data rather
+        # than allowing a zero-filled score to look like evidence of safety.
         satellite_signal = satellite_signal or 0.0
         ai_signal = ai_signal or 0.0
         sensor_signal = sensor_signal or 0.0
@@ -106,22 +155,51 @@ class RiskEngine:
             self.weights["sensor"] * sensor_signal
         )
         
-        # Determine risk level
-        if risk_score < self.thresholds["SAFE"]:
+        explicit_unavailable = bool(evidence.get("unavailable_information"))
+        if missing_inputs or explicit_unavailable:
+            risk_level = "UNKNOWN"
+            action = "Insufficient or withheld observations for decision support"
+            assessment_status = (
+                "INSUFFICIENT_CONFIDENCE"
+                if len(missing_inputs) == 3
+                else "LIMITED_CONFIDENCE"
+            )
+            confidence = "INSUFFICIENT" if len(missing_inputs) == 3 else "LIMITED"
+        elif risk_score < self.thresholds["SAFE"]:
             risk_level = RiskLevel.SAFE
+            assessment_status = "SIMULATED_ASSESSMENT" if simulated_signals else "COMPLETE"
+            confidence = "SIMULATED" if simulated_signals else "PROTOTYPE_LIMITED"
         elif risk_score < self.thresholds["WARNING"]:
             risk_level = RiskLevel.WARNING
+            assessment_status = "SIMULATED_ASSESSMENT" if simulated_signals else "COMPLETE"
+            confidence = "SIMULATED" if simulated_signals else "PROTOTYPE_LIMITED"
         elif risk_score < self.thresholds["HIGH_RISK"]:
             risk_level = RiskLevel.HIGH_RISK
+            assessment_status = "SIMULATED_ASSESSMENT" if simulated_signals else "COMPLETE"
+            confidence = "SIMULATED" if simulated_signals else "PROTOTYPE_LIMITED"
         else:
             risk_level = RiskLevel.CRITICAL
+            assessment_status = "SIMULATED_ASSESSMENT" if simulated_signals else "COMPLETE"
+            confidence = "SIMULATED" if simulated_signals else "PROTOTYPE_LIMITED"
         
         # Generate explanation
         explanation = self._generate_explanation(
             satellite_signal, ai_signal, sensor_signal, risk_score
         )
-        
-        if risk_level == RiskLevel.SAFE:
+        if missing_inputs or explicit_unavailable:
+            explanation = (
+                "No observations available for assessment."
+                if len(missing_inputs) == 3
+                else "No complete evidence basis is available for a definitive risk level."
+            )
+            if unavailable_information:
+                explanation += " | Unavailable or withheld: " + ", ".join(
+                    str(item) for item in unavailable_information
+                )
+
+        if risk_level == "UNKNOWN":
+            action = "Insufficient or withheld observations for decision support"
+        elif risk_level == RiskLevel.SAFE:
             action = "Continue monitoring"
         elif risk_level == RiskLevel.WARNING:
             action = "Increase monitoring and review observations"
@@ -130,10 +208,32 @@ class RiskEngine:
         else:
             action = "Trigger emergency-warning workflow"
 
+        derived_indicators = list(supplied_derived_indicators) if isinstance(
+            supplied_derived_indicators, list
+        ) else [supplied_derived_indicators]
+        derived_indicators.extend([
+            {
+                "name": name,
+                "value": value,
+                "status": "AVAILABLE" if value is not None else "WITHHELD",
+                "source": "RiskEngine input; not a direct observation",
+            }
+            for name, value in (
+                ("satellite_signal", satellite_signal),
+                ("ai_signal", ai_signal),
+                ("sensor_signal", sensor_signal),
+            )
+        ])
+        derived_indicators.append({
+            "name": "weighted_risk_score",
+            "value": round(risk_score, 4),
+            "source": "Prototype weighted combination",
+        })
+
         assessment = {
             "timestamp": datetime.now().isoformat(),
             "risk_score": round(risk_score, 4),
-            "risk_level": risk_level.value,
+            "risk_level": risk_level.value if isinstance(risk_level, RiskLevel) else risk_level,
             "action": action,
             "explanation": explanation,
             "signals": {
@@ -142,7 +242,23 @@ class RiskEngine:
                 "sensor": round(sensor_signal, 4)
             },
             "weights": self.weights,
-            "thresholds": self.thresholds
+            "thresholds": self.thresholds,
+            "observed_evidence": observed_evidence,
+            "derived_indicators": derived_indicators,
+            "assumptions": assumptions,
+            "simulated_signals": simulated_signals,
+            "unavailable_information": unavailable_information,
+            "assessment_status": assessment_status,
+            "confidence": confidence,
+            "decision_support_status": "INSUFFICIENT_DATA" if len(missing_inputs) == 3 else (
+                "LIMITED_DATA" if missing_inputs or explicit_unavailable else "MULTI_SIGNAL"
+            ),
+            "missing_inputs": missing_inputs,
+            "score_interpretation": (
+                "Prototype bounded score; not a validated GLOF probability. "
+                "Missing or withheld evidence is not evidence of safety."
+            ),
+            "meta_flag": ASSESSMENT_META_FLAG,
         }
 
         history_entry = {
@@ -154,7 +270,9 @@ class RiskEngine:
             "ai_signal": round(ai_signal, 4),
             "sensor_signal": round(sensor_signal, 4),
             "explanation": assessment["explanation"],
-            "action": assessment["action"]
+            "action": assessment["action"],
+            "decision_support_status": assessment["decision_support_status"],
+            "missing_inputs": missing_inputs
         }
         self.history.append(history_entry)
         

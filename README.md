@@ -143,6 +143,15 @@ image = pipeline.get_sentinel2_image(
 
 **Formula:** NDWI = (Green - NIR) / (Green + NIR)
 
+**Pixel-level quality masking (live GEE path):** Before NDWI/water-area computation,
+the pipeline applies Sentinel-2 SCL (Scene Classification Layer) masking, excluding
+cloud shadow (3), medium/high-probability cloud (8/9), thin cirrus (10), and snow/ice
+(11). Masking statistics (per-class fractions, valid-pixel fraction) are measured from
+the actual image and reported in the observation under `satellite.quality_masking`.
+**Limitation:** the NDWI water threshold (0.3, McFeeters 1996) is **not calibrated**
+for Himalayan glacial lakes (`satellite.ndwi_threshold.validated` is always `false`),
+and terrain shadow / turbid water remain known limitations.
+
 **Key Classes:**
 - `NDWIAnalyzer` - Calculates NDWI and water masks
 - `WaterObservation` - Stores water observation data

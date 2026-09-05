@@ -13,3 +13,4 @@ yolov8n.pt
 
 .vscode/
 *.log
+g_alert_observations.sqlite3

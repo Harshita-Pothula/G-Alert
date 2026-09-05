@@ -161,7 +161,8 @@ class Sentinel2Pipeline:
             return None
 
     def get_sentinel2_image_with_fallback(self, region_geometry, start_date, end_date, 
-                                         cloud_cover_max=20, max_window_days=90):
+                                         cloud_cover_max=20, max_window_days=90,
+                                         coverage_geometry=None):
         """
         Retrieve Sentinel-2 image with sliding window fallback for robust live demos.
         
@@ -177,6 +178,13 @@ class Sentinel2Pipeline:
             end_date: End date (string "YYYY-MM-DD" or datetime)
             cloud_cover_max: Maximum cloud cover percentage (default 20%)
             max_window_days: Maximum days to expand search window
+            coverage_geometry: optional GeoJSON polygon (e.g. the lake analysis
+                box) that the selected image must actually cover with pixels.
+                Sentinel-2 tiles are ~100 km strips; filterBounds(region_geometry)
+                can match a tile that intersects the large search region but
+                misses the small lake analysis box, which yields empty pixels
+                and NDWI=null / water area 0. When provided, only images with
+                actual pixels over this geometry are selected.
             
         Returns:
             tuple: (ee.Image object or None, search_metadata dict)
@@ -193,12 +201,14 @@ class Sentinel2Pipeline:
             "attempts": [],
             "final_range": None,
             "cloud_cover_relaxed": False,
-            "fallback_used": False
+            "fallback_used": False,
+            "coverage_geometry_verified": coverage_geometry is not None
         }
         
         # Strategy 1: Try exact range with strict cloud cover
         print(f"→ Attempt 1: Exact range {start_date.date()} to {end_date.date()}, cloud ≤ {cloud_cover_max}%")
-        image = self._try_date_range(region_geometry, start_date, end_date, cloud_cover_max)
+        image = self._try_date_range(region_geometry, start_date, end_date, cloud_cover_max,
+                                     coverage_geometry=coverage_geometry)
         search_metadata["attempts"].append({
             "attempt": 1,
             "range": f"{start_date.date()} to {end_date.date()}",
@@ -221,7 +231,8 @@ class Sentinel2Pipeline:
             attempt_num = len(search_metadata["attempts"]) + 1
             print(f"→ Attempt {attempt_num}: Expanded range ±{current_window} days ({expanded_start.date()} to {expanded_end.date()})")
             
-            image = self._try_date_range(region_geometry, expanded_start, expanded_end, cloud_cover_max)
+            image = self._try_date_range(region_geometry, expanded_start, expanded_end, cloud_cover_max,
+                                         coverage_geometry=coverage_geometry)
             search_metadata["attempts"].append({
                 "attempt": attempt_num,
                 "range": f"{expanded_start.date()} to {expanded_end.date()}",
@@ -246,7 +257,8 @@ class Sentinel2Pipeline:
             
             print(f"→ Attempt {attempt_num}: Relaxed cloud cover to {cloud_limit}%")
             
-            image = self._try_date_range(region_geometry, max_start, max_end, cloud_limit)
+            image = self._try_date_range(region_geometry, max_start, max_end, cloud_limit,
+                                         coverage_geometry=coverage_geometry)
             search_metadata["attempts"].append({
                 "attempt": attempt_num,
                 "range": f"{max_start.date()} to {max_end.date()}",
@@ -263,9 +275,49 @@ class Sentinel2Pipeline:
         
         # All strategies failed
         print(f"✗ No suitable imagery found after {len(search_metadata['attempts'])} attempts")
+        if coverage_geometry is not None:
+            print("  (Coverage over the analysis geometry was verified for every attempt)")
         return None, search_metadata
 
-    def _try_date_range(self, region_geometry, start_date, end_date, cloud_cover_max):
+    def _analysis_pixel_count(self, image, coverage_geometry):
+        """
+        Server-side count of image pixels over the coverage geometry.
+
+        Uses the green band (B3): a count of 0 (or None) means the image has
+        no pixels over the geometry, i.e. it does NOT cover the analysis area.
+        """
+        return image.select("B3").reduceRegion(
+            reducer=ee.Reducer.count(),
+            geometry=ee.Geometry(coverage_geometry),
+            scale=30,
+            maxPixels=10_000_000,
+            bestEffort=True,
+        ).get("B3")
+
+    def filter_collection_covering(self, collection, coverage_geometry):
+        """
+        Restrict an image collection to images that actually cover the
+        coverage geometry with at least one pixel.
+
+        Args:
+            collection: ee.ImageCollection (already filtered by bounds/date/cloud)
+            coverage_geometry: GeoJSON polygon the images must cover
+
+        Returns:
+            ee.ImageCollection containing only covering images
+        """
+
+        def _set_pixel_count(image):
+            return image.set(
+                "analysis_pixel_count", self._analysis_pixel_count(image, coverage_geometry)
+            )
+
+        return collection.map(_set_pixel_count).filter(
+            ee.Filter.gt("analysis_pixel_count", 0)
+        )
+
+    def _try_date_range(self, region_geometry, start_date, end_date, cloud_cover_max,
+                        coverage_geometry=None):
         """Helper method to try a specific date range."""
         try:
             ee_geometry = ee.Geometry(region_geometry)
@@ -280,6 +332,20 @@ class Sentinel2Pipeline:
             
             if collection.size().getInfo() == 0:
                 return None
+
+            # Verify actual pixel coverage over the analysis area before
+            # selecting an image. filterBounds only guarantees intersection
+            # with the (large) search region, not coverage of the (small)
+            # lake analysis box.
+            if coverage_geometry is not None:
+                total = collection.size().getInfo()
+                collection = self.filter_collection_covering(collection, coverage_geometry)
+                covering = collection.size().getInfo()
+                if covering == 0:
+                    print(f"  ✗ {total} candidate image(s) found but none covers the analysis area")
+                    return None
+                if covering < total:
+                    print(f"  ✓ Coverage filter: {covering}/{total} candidate image(s) cover the analysis area")
             
             image = collection.first()
             metadata = image.getInfo()

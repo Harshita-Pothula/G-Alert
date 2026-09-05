@@ -1,0 +1,46 @@
+
+=== Initializing G-ALERT Satellite Pipeline ===
+Connecting to Google Earth Engine...
+✓ GEE authenticated via user account
+✓ Satellite pipeline ready
+
+→ Attempt 1: Exact range 2026-08-05 to 2026-09-05, cloud ≤ 20%
+✓ Retrieved image from 20260811T045241_20260811T045240_T45RUL
+  Cloud cover: 13.369124%
+image_id = 20260811T045241_20260811T045240_T45RUL
+search final_range = 2026-08-05 to 2026-09-05
+analysis box lon range: 86.4560 .. 86.4960
+analysis box lat range: 27.8410 .. 27.8810
+SCL histogram over ANALYSIS box: {"SCL": {}}
+SCL histogram over SEARCH box (scale 100m): {"SCL": {"10": 1113.3764705882345, "2": 22, "3": 1333.9647058823525, "4": 66727.12549019608, "5": 5077.9686274509795, "6": 359.2470588235294, "7": 4164.078431372549, "8": 11830.70196078432, "9": 13431.07843137255}}
+valid-mask mean over analysis box (1=fully valid): {'SCL': None}
+✓ NDWI calculated from EE Image
+✓ Water mask created (threshold: 0.3)
+✓ Water area calculated: 0.00 km²
+UNMASKED: ndwi_mean={'B3': None}, area={'area_sqm': 0, 'area_sqkm': 0.0, 'pixel_area_source': 'ee.Image.pixelArea() (projection-derived)'}
+masking info from apply_quality_mask: {
+  "status": "APPLIED",
+  "method": "Sentinel-2 SCL (Scene Classification Layer, band 'SCL')",
+  "excluded_classes": {
+    "3": "cloud_shadow",
+    "8": "cloud_medium_probability",
+    "9": "cloud_high_probability",
+    "10": "thin_cirrus",
+    "11": "snow_ice"
+  },
+  "note": "SCL classes come from the Sen2Cor classification in the Sentinel-2 Level-2A product. Masking removes gross cloud, cloud-shadow, cirrus, and snow/ice contamination; it does not guarantee that all remaining NDWI-positive pixels are water (terrain shadow and turbid water remain known limitations).",
+  "valid_pixel_fraction": null,
+  "masked_pixel_fractions": {
+    "cloud_high_probability": null,
+    "cloud_medium_probability": null,
+    "cloud_shadow": null,
+    "snow_ice": null,
+    "thin_cirrus": null
+  }
+}
+✓ NDWI calculated from EE Image
+✓ Water mask created (threshold: 0.3)
+✓ Water area calculated: 0.00 km²
+MASKED:   ndwi_mean={'B3': None}, area={'area_sqm': 0, 'area_sqkm': 0.0, 'pixel_area_source': 'ee.Image.pixelArea() (projection-derived)'}
+
+Diag written to diag_scl_report.txt
