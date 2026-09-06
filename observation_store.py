@@ -8,6 +8,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from region_integrity import validate_observation, require_valid_region
+
 
 class ObservationStore:
     """Small SQLite-backed observation store for reproducible monitoring history."""
@@ -88,6 +90,7 @@ class ObservationStore:
 
     def save(self, observation):
         """Persist one complete JSON-safe monitoring result and return its ID."""
+        region = validate_observation(observation)
         measurement = observation.get("observed_measurement") or {}
         identity_status = (
             (observation.get("temporal_evidence") or {}).get("identity_status")
@@ -119,7 +122,7 @@ class ObservationStore:
                 (
                     observation_id,
                     recorded_at,
-                    observation.get("region", "UNKNOWN"),
+                    region,
                     observation.get("mode"),
                     observation.get("status", "UNKNOWN"),
                     satellite.get("status"),
@@ -165,8 +168,57 @@ class ObservationStore:
             records.append(record)
         return records
 
+    def get_previous_valid_observation(self, region):
+        """Return the newest prior observation with a valid water-area measurement."""
+        for record in self.list(region, limit=500):
+            observation = record.get("observation") or {}
+            satellite = observation.get("satellite") or {}
+            water_area = satellite.get("water_area") or {}
+            if (
+                observation.get("status") == "SUCCESS"
+                and observation.get("validity_status") != "UNAVAILABLE"
+                and satellite.get("status") == "SUCCESS"
+                and water_area.get("status") == "SUCCESS"
+                and isinstance(water_area.get("area_sqkm"), (int, float))
+            ):
+                return record
+        return None
+
+    def get_previous_valid_risk_observation(self, region):
+        """Return the newest prior observation with a valid risk assessment."""
+        for record in self.list(region, limit=500):
+            observation = record.get("observation") or {}
+            risk = observation.get("risk") or {}
+            if (
+                observation.get("status") == "SUCCESS"
+                and observation.get("validity_status") != "UNAVAILABLE"
+                and isinstance(risk.get("risk_score"), (int, float))
+                and isinstance(risk.get("risk_level"), str)
+            ):
+                return record
+        return None
+
+    def update_observation_payload(self, observation_id, updates):
+        """Merge post-processing fields into an existing observation envelope."""
+        if not observation_id or not isinstance(updates, dict):
+            raise ValueError("observation_id and updates are required")
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM observations WHERE observation_id = ?",
+                (observation_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"observation not found: {observation_id}")
+            payload = json.loads(row["payload_json"])
+            payload.update(updates)
+            connection.execute(
+                "UPDATE observations SET payload_json = ? WHERE observation_id = ?",
+                (json.dumps(payload, sort_keys=True, allow_nan=False), observation_id),
+            )
+
     def save_temporal_evidence(self, evidence_run):
         """Persist a complete multi-date evidence run and its source acquisitions."""
+        region = require_valid_region(evidence_run.get("region"))
         payload_json = json.dumps(evidence_run, sort_keys=True, allow_nan=False)
         temporal = evidence_run.get("temporal_evidence") or {}
         date_range = evidence_run.get("requested_date_range") or {}
@@ -184,7 +236,7 @@ class ObservationStore:
                 (
                     run_id,
                     recorded_at,
-                    evidence_run.get("region", "UNKNOWN"),
+                    region,
                     evidence_run.get("status", "UNKNOWN"),
                     temporal.get("identity_status") or temporal.get("status"),
                     date_range.get("start"),

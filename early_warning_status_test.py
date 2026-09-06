@@ -8,6 +8,7 @@ from early_warning_status import (
     UNCONFIRMED,
     WARNING,
     WATCH,
+    build_human_warning,
     evaluate_early_warning_status,
 )
 
@@ -97,6 +98,28 @@ def test_provenance_and_explanation_are_preserved():
     assert result["evidence_state"]["identity_status"] == "IDENTITY_SUPPORTED"
 
 
+def test_human_warning_separates_status_evidence_and_action_from_risk_score():
+    observation = _observation("HIGH_RISK")
+    observation["satellite"]["seasonal_comparison"] = {"status": "VALID"}
+    observation["satellite_change"] = {
+        "current_area_sqkm": 12.0,
+        "previous_area_sqkm": 10.0,
+        "previous_observation_percent_change": 20.0,
+        "trend": "INCREASING",
+    }
+    observation["data_confidence"] = {"level": "MEDIUM"}
+    status_result = evaluate_early_warning_status(observation)
+    warning = build_human_warning(observation, status_result)
+    assert warning["status"] == WARNING
+    assert warning["level"] == "WARNING"
+    assert warning["reasons"]
+    assert warning["supporting_evidence"]
+    assert any("20.0%" in item for item in warning["supporting_evidence"])
+    assert warning["recommended_action"]
+    assert warning["technical_details_separate"] is True
+    assert "risk_score" not in warning
+
+
 if __name__ == "__main__":
     test_valid_normal_condition()
     test_developing_condition_is_watch()
@@ -105,4 +128,5 @@ if __name__ == "__main__":
     test_stale_data_is_insufficient()
     test_missing_evidence_never_becomes_normal()
     test_provenance_and_explanation_are_preserved()
+    test_human_warning_separates_status_evidence_and_action_from_risk_score()
     print("Early-warning status tests: PASS")

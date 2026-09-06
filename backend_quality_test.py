@@ -8,6 +8,9 @@ from app import app
 from main import (
     _acquisition_is_in_requested_range,
     _integrated_result_skeleton,
+    _data_confidence_summary,
+    _previous_observation_change,
+    _risk_change_explanation,
     run_integrated_monitoring,
     run_tsho_rolpa_temporal_evidence,
 )
@@ -300,6 +303,178 @@ def test_observation_store_rejects_area_without_supported_identity():
             assert "IDENTITY_SUPPORTED" in str(exc)
         else:
             raise AssertionError("invalid identity-area combination was persisted")
+
+
+def test_previous_valid_observation_change_is_separate_from_seasonal_baseline():
+    with tempfile.TemporaryDirectory() as directory:
+        store = ObservationStore(os.path.join(directory, "observations.sqlite3"))
+        previous = _observation_fixture()
+        previous["status"] = "SUCCESS"
+        previous["validity_status"] = "VALID"
+        previous["satellite"]["status"] = "SUCCESS"
+        previous["satellite"]["acquisition_time"] = "2026-05-25T05:00:00+00:00"
+        previous["satellite"]["water_area"] = {"status": "SUCCESS", "area_sqkm": 10.0}
+        previous["observed_measurement"] = {
+            "status": "UNAVAILABLE",
+            "area_sqkm": None,
+            "provenance": {"type": UNAVAILABLE},
+        }
+        store.save(previous)
+
+        current = _observation_fixture()
+        current["status"] = "SUCCESS"
+        current["validity_status"] = "VALID"
+        current["satellite"]["status"] = "SUCCESS"
+        current["satellite"]["quality_masking"] = {"status": "APPLIED"}
+        current["satellite"]["data_quality"] = {
+            "confidence": 0.9,
+            "valid_pixel_fraction": 0.9,
+        }
+        current["satellite"]["water_area"] = {"status": "SUCCESS", "area_sqkm": 12.0}
+        current["satellite"]["seasonal_comparison"] = {
+            "status": "VALID",
+            "baseline_value": 9.0,
+            "deviation_percentage": 33.3333333333,
+            "baseline": {"statistics": {"mean": 9.0}},
+        }
+        current["observed_measurement"] = {
+            "status": "UNAVAILABLE",
+            "area_sqkm": None,
+            "provenance": {"type": UNAVAILABLE},
+        }
+        current["decision_support"] = {
+            "status": "PROTOTYPE_ASSESSMENT",
+            "risk_available": True,
+        }
+        current["risk"] = {
+            "risk_level": "SAFE",
+            "assessment_status": "COMPLETE",
+            "decision_support_status": "MULTI_SIGNAL",
+            "confidence": "PROTOTYPE_LIMITED",
+            "unavailable_information": [],
+            "simulated_signals": [],
+            "assumptions": [],
+            "explanation": "test evidence",
+        }
+        change = _previous_observation_change(store, "Tsho_Rolpa_Nepal", 12.0)
+        assert change["previous_area_sqkm"] == 10.0
+        assert change["current_area_sqkm"] == 12.0
+        assert change["previous_observation_percent_change"] == 20.0
+        assert change["trend"] == "INCREASING"
+        assert current["satellite"]["seasonal_comparison"]["baseline_value"] == 9.0
+        assert current["satellite"]["seasonal_comparison"]["baseline_value"] != change["previous_area_sqkm"]
+
+
+def test_previous_invalid_observations_are_skipped():
+    with tempfile.TemporaryDirectory() as directory:
+        store = ObservationStore(os.path.join(directory, "observations.sqlite3"))
+        invalid = _observation_fixture()
+        invalid["status"] = "SUCCESS"
+        invalid["validity_status"] = "VALID"
+        invalid["satellite"]["status"] = "SUCCESS"
+        invalid["satellite"]["water_area"] = {"status": "NO_VALID_PIXELS", "area_sqkm": None}
+        store.save(invalid)
+        assert store.get_previous_valid_observation("Tsho_Rolpa_Nepal") is None
+
+
+def test_risk_change_explanation_compares_previous_valid_result():
+    with tempfile.TemporaryDirectory() as directory:
+        store = ObservationStore(os.path.join(directory, "observations.sqlite3"))
+        previous = _observation_fixture()
+        previous.update({"status": "SUCCESS", "validity_status": "VALID"})
+        previous["satellite"].update({
+            "status": "SUCCESS",
+            "water_area": {"status": "SUCCESS", "area_sqkm": 10.0},
+        })
+        previous["satellite_change"] = {
+            "current_area_sqkm": 10.0,
+            "previous_observation_percent_change": None,
+            "trend": None,
+            "status": "NOT_AVAILABLE",
+        }
+        previous["risk"] = {
+            "risk_score": 0.2,
+            "risk_level": "SAFE",
+            "assessment_status": "COMPLETE",
+            "confidence": "PROTOTYPE_LIMITED",
+            "signals": {"satellite": 0.2},
+            "missing_inputs": [],
+            "unavailable_information": [],
+        }
+        store.save(previous)
+
+        current = {
+            "status": "SUCCESS",
+            "validity_status": "VALID",
+            "satellite": {"acquisition_time": "2026-09-05T05:00:00+00:00"},
+            "satellite_change": {
+                "current_area_sqkm": 12.0,
+                "previous_observation_percent_change": 20.0,
+                "trend": "INCREASING",
+                "status": "CALCULATED",
+                "data_quality_confidence": 0.8,
+            },
+            "risk": {
+                "risk_score": 0.5,
+                "risk_level": "WARNING",
+                "assessment_status": "COMPLETE",
+                "confidence": "LIMITED",
+                "signals": {"satellite": 0.5},
+                "missing_inputs": [],
+                "unavailable_information": [],
+            },
+        }
+        result = _risk_change_explanation(store, "Tsho_Rolpa_Nepal", current)
+        assert result["status"] == "CALCULATED"
+        assert result["previous_risk_score"] == 0.2
+        assert result["current_risk_score"] == 0.5
+        assert result["previous_risk_level"] == "SAFE"
+        assert result["current_risk_level"] == "WARNING"
+        assert result["previous_risk_status"] == "COMPLETE"
+        assert result["current_risk_status"] == "COMPLETE"
+        assert result["trend"] == "INCREASING"
+        assert result["score_change"] == 0.3
+        assert result["contributing_changes"]["lake_area"]["percent_change"] == 20.0
+        assert "Risk score changed" in result["explanation"]
+
+
+def test_unified_data_confidence_summary_is_not_risk_probability():
+    observation = {
+        "status": "SUCCESS",
+        "provenance": {
+            "type": DERIVED_FROM_REAL_DATA,
+            "source": "Sentinel-2",
+            "limitations": [],
+        },
+        "satellite": {
+            "status": "SUCCESS",
+            "quality_masking": {"status": "APPLIED"},
+            "data_quality": {"confidence": 0.9, "valid_pixel_fraction": 0.9},
+            "candidate_detection": {"identity_status": "IDENTITY_SUPPORTED"},
+            "seasonal_comparison": {
+                "status": "VALID",
+                "baseline": {"observation_count": 4},
+            },
+        },
+        "risk": {
+            "missing_inputs": [],
+            "unavailable_information": [],
+            "assumptions": [],
+        },
+    }
+    summary = _data_confidence_summary(observation)
+    assert summary["level"] == "HIGH"
+    assert summary["is_probability"] is False
+    assert summary["factors"]["imagery_quality"]["status"] == "AVAILABLE"
+    assert summary["factors"]["lake_identity"]["quality"] == "HIGH"
+    assert summary["factors"]["historical_baseline"]["quality"] == "HIGH"
+
+    observation["satellite"]["candidate_detection"]["identity_status"] = "IDENTITY_AMBIGUOUS"
+    observation["satellite"]["seasonal_comparison"]["status"] = "NOT_AVAILABLE"
+    degraded = _data_confidence_summary(observation)
+    assert degraded["level"] == "LOW"
+    assert degraded["reasons"]
+    assert any("lake identity" in reason for reason in degraded["reasons"])
 
 
 def test_temporal_evidence_persistence_and_retrieval():

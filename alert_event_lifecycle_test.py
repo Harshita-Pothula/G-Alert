@@ -12,6 +12,12 @@ from alert_event_lifecycle import (
     AlertEventLifecycleManager,
     DuplicateActiveAlert,
     InvalidAlertTransition,
+    CONFIRMED,
+    NEWLY_DETECTED,
+    PENDING_CONFIRMATION,
+    PERSISTENT,
+    RESOLVED,
+    evaluate_warning_confirmation,
 )
 
 
@@ -139,10 +145,62 @@ def test_unverified_warning_cannot_create_alert():
         directory.cleanup()
 
 
+def _warning_observation(observation_id, state="WARNING", score=0.7, trend="STABLE"):
+    return {
+        "observation_id": observation_id,
+        "status": "SUCCESS",
+        "early_warning_status": {"status": state},
+        "risk": {"risk_score": score, "risk_level": "HIGH_RISK"},
+        "satellite_change": {"trend": trend},
+    }
+
+
+def test_warning_confirmation_progression_and_resolution():
+    current = _warning_observation("current")
+    first = evaluate_warning_confirmation(current, [])
+    assert first["state"] == NEWLY_DETECTED
+    assert first["confirmed"] is False
+
+    second = evaluate_warning_confirmation(
+        current, [{"observation": _warning_observation("prior-1")}]
+    )
+    assert second["state"] == PENDING_CONFIRMATION
+    assert second["consecutive_warning_observations"] == 2
+
+    confirmed = evaluate_warning_confirmation(
+        current,
+        [
+            {"observation": _warning_observation("prior-2")},
+            {"observation": _warning_observation("prior-1")},
+        ],
+    )
+    assert confirmed["state"] == CONFIRMED
+    assert confirmed["confirmed"] is True
+
+    persistent = evaluate_warning_confirmation(
+        _warning_observation("current-worsening", trend="INCREASING"),
+        [
+            {"observation": _warning_observation("prior-3")},
+            {"observation": _warning_observation("prior-2")},
+            {"observation": _warning_observation("prior-1")},
+        ],
+    )
+    assert persistent["state"] == PERSISTENT
+    assert persistent["persistent"] is True
+
+    resolved = evaluate_warning_confirmation(
+        _warning_observation("normal", state="NORMAL"),
+        [{"observation": _warning_observation("prior-1")}],
+    )
+    assert resolved["state"] == RESOLVED
+    assert resolved["confirmed"] is False
+
+
 if __name__ == "__main__":
     test_state_transitions_and_invalid_transitions()
     test_snapshot_is_immutable_and_traceable()
     test_persistence_survives_manager_restart()
     test_duplicate_active_alert_is_blocked_but_resolved_alert_allows_new_event()
     test_unverified_warning_cannot_create_alert()
+    test_warning_confirmation_progression_and_resolution()
     print("Alert event lifecycle tests: PASS")

@@ -10,12 +10,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from audit_trail import AuditTrail
+from region_integrity import require_region_match, require_valid_region
 
 
 CREATED = "CREATED"
 EVIDENCE_SNAPSHOT_TAKEN = "EVIDENCE_SNAPSHOT_TAKEN"
 ACKNOWLEDGED = "ACKNOWLEDGED"
 RESOLVED = "RESOLVED"
+
+NEWLY_DETECTED = "NEWLY_DETECTED"
+PENDING_CONFIRMATION = "PENDING_CONFIRMATION"
+CONFIRMED = "CONFIRMED"
+PERSISTENT = "PERSISTENT"
+NO_ACTIVE_WARNING = "NO_ACTIVE_WARNING"
 
 ALERT_STATES = {
     CREATED,
@@ -50,6 +57,98 @@ class InvalidAlertTransition(AlertLifecycleError):
 
 class AlertNotFound(AlertLifecycleError):
     """Raised when an alert identifier is not present in storage."""
+
+
+def evaluate_warning_confirmation(
+    current_observation,
+    historical_observations=None,
+    *,
+    confirmation_observations=3,
+    persistent_observations=4,
+):
+    """Classify warning persistence without recalculating risk.
+
+    Historical observations are expected newest first. The current observation
+    is evaluated separately so a just-persisted envelope can be compared with
+    the prior stored evidence without creating a duplicate observation.
+    """
+    from early_warning_status import evaluate_early_warning_status
+
+    historical_observations = historical_observations or []
+    current_status = (current_observation or {}).get("early_warning_status") or {}
+    current_status = current_status.get("status") or evaluate_early_warning_status(
+        current_observation or {}
+    ).get("status")
+    previous_warning_observations = []
+    for record in historical_observations:
+        observation = record.get("observation", record)
+        status_result = observation.get("early_warning_status") or evaluate_early_warning_status(observation)
+        if status_result.get("status") == "WARNING":
+            previous_warning_observations.append({
+                "observation_id": record.get("observation_id") or observation.get("observation_id"),
+                "acquisition_time": (observation.get("satellite") or {}).get("acquisition_time"),
+                "risk": observation.get("risk") or {},
+                "satellite_change": observation.get("satellite_change") or {},
+            })
+        else:
+            break
+
+    current_id = (current_observation or {}).get("observation_id")
+    evidence_ids = [item.get("observation_id") for item in previous_warning_observations]
+    if current_id:
+        evidence_ids.insert(0, current_id)
+    consecutive_count = len(previous_warning_observations) + (1 if current_status == "WARNING" else 0)
+    required_confirmation = max(3, int(confirmation_observations))
+    required_persistence = max(required_confirmation, int(persistent_observations))
+
+    if current_status != "WARNING":
+        prior_warning = bool(previous_warning_observations)
+        state = "RESOLVED" if prior_warning and current_status in {"NORMAL", "WATCH"} else NO_ACTIVE_WARNING
+        return {
+            "state": state,
+            "warning_status": current_status,
+            "consecutive_warning_observations": 0,
+            "required_confirmation_observations": required_confirmation,
+            "required_persistent_observations": required_persistence,
+            "confirmed": False,
+            "persistent": False,
+            "evidence_observation_ids": evidence_ids,
+            "reason": (
+                "The previous warning condition is no longer present."
+                if state == "RESOLVED"
+                else "No current confirmed warning condition is present."
+            ),
+        }
+
+    current_change = (current_observation or {}).get("satellite_change") or {}
+    worsening = current_change.get("trend") == "INCREASING"
+    confirmed = consecutive_count >= required_confirmation
+    persistent = consecutive_count >= required_persistence or (
+        consecutive_count >= required_confirmation and worsening
+    )
+    state = PERSISTENT if persistent else CONFIRMED if confirmed else (
+        PENDING_CONFIRMATION if previous_warning_observations else NEWLY_DETECTED
+    )
+    return {
+        "state": state,
+        "warning_status": current_status,
+        "consecutive_warning_observations": consecutive_count,
+        "required_confirmation_observations": required_confirmation,
+        "required_persistent_observations": required_persistence,
+        "confirmed": confirmed,
+        "persistent": persistent,
+        "worsening_condition": worsening,
+        "evidence_observation_ids": evidence_ids,
+        "reason": (
+            "The warning has persisted across repeated valid observations."
+            if persistent
+            else "The warning is confirmed by repeated observations."
+            if confirmed
+            else "A warning-level observation requires another observation for confirmation."
+            if state == PENDING_CONFIRMATION
+            else "A new warning-level observation has been detected and is awaiting confirmation."
+        ),
+    }
 
 
 class AlertEventLifecycleManager:
@@ -151,9 +250,15 @@ class AlertEventLifecycleManager:
         )
         self._validate_provenance(snapshot_provenance)
 
-        alert_region = region or evidence_snapshot.get("region")
-        if not alert_region:
-            raise AlertCreationRejected("alert region is required")
+        snapshot_region = evidence_snapshot.get("region")
+        alert_region = region or snapshot_region
+        try:
+            require_valid_region(alert_region)
+            require_region_match(alert_region, snapshot_region, "evidence_snapshot.region")
+            if assessment.get("region") is not None:
+                require_region_match(alert_region, assessment.get("region"), "assessment.region")
+        except ValueError as exc:
+            raise AlertCreationRejected(str(exc)) from exc
         alert_condition_key = condition_key or f"{alert_region}:WARNING"
         captured_at = datetime.now(timezone.utc).isoformat()
         snapshot = {

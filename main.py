@@ -15,7 +15,7 @@ from simulation.sensor_simulator import SensorNetwork, SensorObservation
 from simulation.nepal_disaster import NepalDisasterScenario
 from risk_engine import RiskEngine, RiskAssessment
 from ai.yolov8_detector import Detection, AIObservation, YOLOv8Detector
-from satellite.ndwi_analysis import WaterObservation
+from satellite.ndwi_analysis import NDWIAnalyzer, WaterObservation
 from satellite.lake_detection import (
     IDENTITY_SUPPORTED,
     build_temporal_tracks,
@@ -41,7 +41,12 @@ from seasonal_baseline import evaluate_against_seasonal_baseline
 from contextual_change import evaluate_contextual_change
 from gee_reliability import GEEReliabilityLayer, merge_reliability_metadata
 from execution_manager import MonitoringExecutionManager
-from early_warning_status import evaluate_early_warning_status, INSUFFICIENT_DATA
+from early_warning_status import (
+    build_human_warning,
+    evaluate_early_warning_status,
+    INSUFFICIENT_DATA,
+)
+from alert_event_lifecycle import evaluate_warning_confirmation
 from satellite.multi_signal_identity import (
     build_evidence_lifecycle,
     evaluate_multi_signal_identity,
@@ -50,6 +55,11 @@ from authoritative_boundary import IDENTITY_AMBIGUOUS
 from authoritative_boundary import validate_authoritative_boundary
 from satellite.identity_association import associate_temporal_identity
 from satellite_cross_validation import query_landsat_availability
+from weather_integration import fetch_weather_observation
+from downstream_impact import build_downstream_impact
+from downstream_provider import fetch_automated_downstream_context
+from impact_mapping import build_impact_mapping
+from region_integrity import validate_observation
 
 import json
 from copy import deepcopy
@@ -65,6 +75,9 @@ INTEGRATED_RESULT_KEYS = (
     "sensors",
     "ai",
     "risk",
+    "alert_confirmation",
+    "downstream_impact",
+    "impact_mapping",
     "downstream_exposure",
     "history",
 )
@@ -153,10 +166,66 @@ def _integrated_result_skeleton(region_key, status, mode="monitoring", reason=No
             "source": region.get("geometry_source") if region else None,
             "measurement_scope": "UNKNOWN",
         },
+        "downstream_impact": build_downstream_impact(region_key, region),
+        "impact_mapping": {
+            "region": region_key,
+            "status": "UNAVAILABLE",
+            "classification": "SCREENING_APPROXIMATE",
+            "corridor": None,
+            "exposed_settlements": [],
+            "exposed_infrastructure": [],
+            "population": {"value": None, "status": "UNAVAILABLE"},
+            "confidence": "LOW",
+            "limitations": [
+                "No impact corridor was produced; missing data does not imply no impact",
+                "This feature is approximate screening, not hydrodynamic flood simulation",
+            ],
+        },
         "processed_at": processed_at,
         "satellite": {"status": "NOT_AVAILABLE"},
-        "satellite_change": {"status": "NOT_AVAILABLE"},
-        "satellite_change_evidence": {"status": "NOT_AVAILABLE"},
+        "weather": {
+            "region": region_key,
+            "status": "UNAVAILABLE",
+            "source": "Open-Meteo",
+            "rainfall_mmph": None,
+            "rainfall_24h_mm": None,
+            "observation_time": None,
+            "provenance": {
+                "type": "UNAVAILABLE",
+                "source": "Open-Meteo",
+                "limitations": ["No weather observation was produced"],
+            },
+        },
+        "satellite_change": {"region": region_key, "status": "NOT_AVAILABLE"},
+        "satellite_change_evidence": {"region": region_key, "status": "NOT_AVAILABLE"},
+        "risk_change_explanation": {"region": region_key, "status": "NOT_AVAILABLE"},
+        "human_warning": {
+            "region": region_key,
+            "status": INSUFFICIENT_DATA,
+            "level": "INSUFFICIENT DATA",
+            "message": "A warning decision cannot be made from the available evidence.",
+            "reasons": ["No usable observation evidence is available."],
+            "supporting_evidence": [],
+            "recommended_action": "Obtain usable observations before making a warning decision; do not interpret missing data as safety.",
+            "technical_details_separate": True,
+        },
+        "alert_confirmation": {
+            "region": region_key,
+            "state": "NO_ACTIVE_WARNING",
+            "warning_status": INSUFFICIENT_DATA,
+            "confirmed": False,
+            "persistent": False,
+            "reason": "No usable observation evidence is available.",
+        },
+        "data_confidence": {
+            "region": region_key,
+            "level": "LOW",
+            "is_probability": False,
+            "summary": "Data confidence is LOW because no usable observation was produced.",
+            "reasons": ["usable observation evidence is unavailable"],
+            "factors": {},
+            "limitations": ["This response does not contain a usable satellite observation"],
+        },
         "sensors": {
             "status": "NOT_RUN",
             "note": "Virtual sensors run only in simulation mode",
@@ -181,6 +250,28 @@ def _integrated_result_skeleton(region_key, status, mode="monitoring", reason=No
     return result
 
 
+_REGION_SCOPED_SECTIONS = (
+    "weather",
+    "human_warning",
+    "data_confidence",
+    "alert_confirmation",
+    "satellite_change",
+    "risk_change_explanation",
+    "satellite_change_evidence",
+)
+
+
+def _validate_nested_region_identity(observation, region_key):
+    """Validate explicit region metadata on region-scoped response sections."""
+    for section_name in _REGION_SCOPED_SECTIONS:
+        section = observation.get(section_name)
+        if isinstance(section, dict) and section.get("region") is not None:
+            if section["region"] != region_key:
+                raise ValueError(
+                    f"{section_name}.region does not match requested region {region_key!r}"
+                )
+
+
 def _attach_risk_and_history(result, engine, satellite_signal, ai_signal, sensor_signal, region_key):
     """Record one RiskEngine assessment and expose instance history on the result."""
     risk = engine.assess_risk(
@@ -193,6 +284,306 @@ def _attach_risk_and_history(result, engine, satellite_signal, ai_signal, sensor
     result["risk"] = risk
     result["history"] = list(engine.history)
     return result
+
+
+def _previous_observation_change(store, region_key, current_area_sqkm):
+    """Compare the current valid area with the newest prior valid observation."""
+    previous_observation = store.get_previous_valid_observation(region_key)
+    change = {
+        "current_area_sqkm": current_area_sqkm,
+        "previous_area_sqkm": None,
+        "previous_observation_id": None,
+        "previous_acquisition_time": None,
+        "previous_observation_percent_change": None,
+        "trend": None,
+    }
+    if not previous_observation or not isinstance(current_area_sqkm, (int, float)):
+        return change
+
+    previous_payload = previous_observation.get("observation") or {}
+    previous_satellite = previous_payload.get("satellite") or {}
+    previous_area_sqkm = (previous_satellite.get("water_area") or {}).get("area_sqkm")
+    if not isinstance(previous_area_sqkm, (int, float)):
+        return change
+
+    previous_change = NDWIAnalyzer().analyze_water_change(
+        current_area_sqkm,
+        previous_area_sqkm,
+    )
+    change.update({
+        "current_area_sqkm": current_area_sqkm,
+        "previous_area_sqkm": previous_area_sqkm,
+        "previous_observation_id": previous_observation.get("observation_id"),
+        "previous_acquisition_time": previous_satellite.get("acquisition_time"),
+        "previous_observation_percent_change": previous_change.get("percent_change"),
+        "trend": previous_change.get("trend", "").upper(),
+    })
+    return change
+
+
+def _risk_change_explanation(store, region_key, current_observation):
+    """Explain risk movement using the newest prior valid risk observation."""
+    current_risk = current_observation.get("risk") or {}
+    current_score = current_risk.get("risk_score")
+    change = {
+        "region": region_key,
+        "status": "NOT_AVAILABLE",
+        "trend": None,
+        "previous_risk_score": None,
+        "current_risk_score": current_score,
+        "previous_risk_level": None,
+        "current_risk_level": current_risk.get("risk_level"),
+        "previous_risk_status": None,
+        "current_risk_status": current_risk.get("assessment_status"),
+        "score_change": None,
+        "explanation": "No previous valid risk result is available for comparison.",
+        "contributing_changes": {},
+    }
+    previous_record = store.get_previous_valid_risk_observation(region_key)
+    if not previous_record or not isinstance(current_score, (int, float)):
+        return change
+
+    previous_observation = previous_record.get("observation") or {}
+    previous_risk = previous_observation.get("risk") or {}
+    previous_score = previous_risk.get("risk_score")
+    score_change = round(current_score - previous_score, 4)
+    trend = (
+        "INCREASING" if score_change > 0
+        else "DECREASING" if score_change < 0
+        else "STABLE"
+    )
+
+    current_satellite_change = current_observation.get("satellite_change") or {}
+    previous_satellite_change = previous_observation.get("satellite_change") or {}
+    current_signals = current_risk.get("signals") or {}
+    previous_signals = previous_risk.get("signals") or {}
+    current_missing = current_risk.get("missing_inputs") or []
+    previous_missing = previous_risk.get("missing_inputs") or []
+    current_unavailable = current_risk.get("unavailable_information") or []
+    previous_unavailable = previous_risk.get("unavailable_information") or []
+
+    satellite_change = None
+    if (
+        isinstance(current_signals.get("satellite"), (int, float))
+        and isinstance(previous_signals.get("satellite"), (int, float))
+    ):
+        satellite_change = round(
+            current_signals["satellite"] - previous_signals["satellite"], 4
+        )
+    contributing_changes = {
+        "lake_area": {
+            "previous_area_sqkm": previous_satellite_change.get("current_area_sqkm"),
+            "current_area_sqkm": current_satellite_change.get("current_area_sqkm"),
+            "percent_change": current_satellite_change.get(
+                "previous_observation_percent_change"
+            ),
+            "trend": current_satellite_change.get("trend"),
+        },
+        "satellite_signal": {
+            "previous": previous_signals.get("satellite"),
+            "current": current_signals.get("satellite"),
+            "change": satellite_change,
+            "evidence_status": current_satellite_change.get("status"),
+        },
+        "confidence": {
+            "previous": previous_risk.get("confidence"),
+            "current": current_risk.get("confidence"),
+            "data_quality_confidence": current_satellite_change.get(
+                "data_quality_confidence"
+            ),
+        },
+        "evidence_availability": {
+            "previous_missing_inputs": previous_missing,
+            "current_missing_inputs": current_missing,
+            "previous_unavailable_information": previous_unavailable,
+            "current_unavailable_information": current_unavailable,
+        },
+    }
+    reasons = [
+        f"Risk score changed from {previous_score:.4f} to {current_score:.4f} ({trend.lower()})."
+    ]
+    area_change = contributing_changes["lake_area"]
+    if area_change["percent_change"] is not None:
+        reasons.append(
+            f"Lake area changed {area_change['percent_change']:.1f}% ({area_change['trend']})."
+        )
+    if satellite_change is not None and satellite_change != 0:
+        reasons.append(f"Satellite risk signal changed by {satellite_change:+.4f}.")
+    if current_risk.get("confidence") != previous_risk.get("confidence"):
+        reasons.append(
+            f"Risk confidence changed from {previous_risk.get('confidence')} to {current_risk.get('confidence')}."
+        )
+    if current_missing != previous_missing or current_unavailable != previous_unavailable:
+        reasons.append("The available or withheld evidence changed between observations.")
+
+    change.update({
+        "status": "CALCULATED",
+        "trend": trend,
+        "previous_risk_score": previous_score,
+        "previous_risk_level": previous_risk.get("risk_level"),
+        "previous_risk_status": previous_risk.get("assessment_status"),
+        "score_change": score_change,
+        "explanation": " ".join(reasons),
+        "contributing_changes": contributing_changes,
+        "previous_observation_id": previous_record.get("observation_id"),
+        "previous_acquisition_time": (
+            (previous_observation.get("satellite") or {}).get("acquisition_time")
+        ),
+    })
+    return change
+
+
+def _data_confidence_summary(observation):
+    """Summarize evidence quality without treating confidence as probability."""
+    observation = observation if isinstance(observation, dict) else {}
+    satellite = observation.get("satellite") or {}
+    risk = observation.get("risk") or {}
+    quality = satellite.get("data_quality") or {}
+    masking = satellite.get("quality_masking") or {}
+    identity = (
+        (observation.get("temporal_evidence") or {}).get("identity_status")
+        or (satellite.get("candidate_detection") or {}).get("identity_status")
+        or observation.get("identity_status")
+        or "UNAVAILABLE"
+    )
+    seasonal = satellite.get("seasonal_comparison") or {}
+    provenance_record = observation.get("provenance") or {}
+    limitations = list(provenance_record.get("limitations") or [])
+    contextual_change = observation.get("satellite_change_evidence") or {}
+    limitations.extend(contextual_change.get("limitations") or [])
+    limitations.extend(contextual_change.get("uncertainty", {}).get("reasons") or [])
+    limitations.extend(risk.get("unavailable_information") or [])
+    limitations.extend(risk.get("assumptions") or [])
+    limitations.extend((observation.get("weather") or {}).get("provenance", {}).get("limitations") or [])
+    limitations.extend((observation.get("downstream_impact") or {}).get("limitations") or [])
+    limitations.extend((observation.get("impact_mapping") or {}).get("limitations") or [])
+    limitations = list(dict.fromkeys(str(item) for item in limitations if item))
+
+    valid_pixel_fraction = quality.get("valid_pixel_fraction")
+    imagery_quality = "AVAILABLE"
+    imagery_reasons = []
+    if satellite.get("status") in {
+        None, "NOT_AVAILABLE", "NO_SUITABLE_IMAGERY", "STALE_IMAGERY",
+        "MASKING_FAILED", "PROCESSING_FAILED", "NO_VALID_PIXELS",
+    }:
+        imagery_quality = "INSUFFICIENT"
+        imagery_reasons.append("usable satellite imagery or processing output is unavailable")
+    elif masking.get("status") != "APPLIED":
+        imagery_quality = "DEGRADED"
+        imagery_reasons.append("satellite quality masking was not applied")
+    elif isinstance(valid_pixel_fraction, (int, float)) and valid_pixel_fraction < 0.6:
+        imagery_quality = "DEGRADED"
+        imagery_reasons.append("valid-pixel fraction is below the existing quality threshold")
+    elif isinstance(quality.get("confidence"), (int, float)) and quality["confidence"] < 0.6:
+        imagery_quality = "DEGRADED"
+        imagery_reasons.append("imagery quality confidence is below 0.6")
+
+    identity_quality = "HIGH" if identity == "IDENTITY_SUPPORTED" else (
+        "INSUFFICIENT" if identity in {"UNAVAILABLE", "IDENTITY_AMBIGUOUS", "IDENTITY_UNCERTAIN", "IDENTITY_NOT_ESTABLISHED"}
+        else "DEGRADED"
+    )
+    identity_reasons = [] if identity_quality == "HIGH" else [
+        f"lake identity is {identity}"
+    ]
+    baseline_quality = "HIGH" if seasonal.get("status") == "VALID" else "INSUFFICIENT"
+    baseline_reasons = [] if baseline_quality == "HIGH" else [
+        "historical or seasonal baseline is unavailable or insufficient"
+    ]
+    missing_inputs = list(risk.get("missing_inputs") or [])
+    unavailable = list(risk.get("unavailable_information") or [])
+    evidence_quality = "HIGH" if not missing_inputs and not unavailable else "DEGRADED"
+    evidence_reasons = []
+    if missing_inputs:
+        evidence_reasons.append("missing signals: " + ", ".join(missing_inputs))
+    if unavailable:
+        evidence_reasons.append("unavailable information is present")
+
+    weather_present = "weather" in observation
+    weather = observation.get("weather") or {}
+    weather_quality = (
+        "HIGH" if weather.get("status") == "SUCCESS"
+        else "INSUFFICIENT" if weather_present
+        else "NOT_ASSESSED"
+    )
+    weather_reasons = (
+        [] if weather_quality in {"HIGH", "NOT_ASSESSED"}
+        else [f"weather data is {weather.get('status', 'UNAVAILABLE').lower()}" ]
+    )
+
+    simulated = (
+        observation.get("mode") == NEPAL_SIMULATION_MODE
+        or observation.get("simulated") is True
+        or provenance_record.get("type") in {SIMULATED_SENSOR_DATA, SCIENTIFIC_SIMULATION}
+    )
+    if simulated:
+        limitations.append("This output contains simulated rather than field-observed inputs")
+
+    hard_degradation = (
+        observation.get("status") in {"ERROR", "NO_SUITABLE_IMAGERY", "STALE_IMAGERY", "SATELLITE_PROCESSING_ERROR"}
+        or imagery_quality == "INSUFFICIENT"
+        or identity_quality == "INSUFFICIENT"
+    )
+    moderate_degradation = (
+        simulated
+        or imagery_quality == "DEGRADED"
+        or identity_quality == "DEGRADED"
+        or baseline_quality == "INSUFFICIENT"
+        or evidence_quality == "DEGRADED"
+        or weather_quality == "INSUFFICIENT"
+        or bool(limitations)
+    )
+    level = "LOW" if hard_degradation else "MEDIUM" if moderate_degradation else "HIGH"
+    reasons = imagery_reasons + identity_reasons + baseline_reasons + evidence_reasons + weather_reasons
+    if simulated:
+        reasons.append("one or more inputs are explicitly simulated")
+    if not reasons and limitations:
+        reasons.append("known methodological limitations remain even though required evidence is present")
+
+    return {
+        "region": observation.get("region"),
+        "level": level,
+        "is_probability": False,
+        "summary": (
+            f"Data confidence is {level}; this describes evidence quality and completeness, "
+            "not the probability of a GLOF."
+        ),
+        "reasons": list(dict.fromkeys(reasons)),
+        "factors": {
+            "imagery_quality": {
+                "status": imagery_quality,
+                "quality_masking": masking.get("status"),
+                "valid_pixel_fraction": valid_pixel_fraction,
+                "confidence": quality.get("confidence"),
+            },
+            "lake_identity": {
+                "status": identity,
+                "quality": identity_quality,
+            },
+            "historical_baseline": {
+                "status": seasonal.get("status", "NOT_AVAILABLE"),
+                "quality": baseline_quality,
+                "observation_count": (seasonal.get("baseline") or {}).get("observation_count"),
+            },
+            "evidence_availability": {
+                "status": evidence_quality,
+                "missing_inputs": missing_inputs,
+                "unavailable_information": unavailable,
+            },
+            "weather": {
+                "status": weather.get("status", "UNAVAILABLE"),
+                "quality": weather_quality,
+                "observation_time": weather.get("observation_time"),
+                "source": weather.get("source"),
+                "rainfall_mmph": weather.get("rainfall_mmph"),
+                "rainfall_24h_mm": weather.get("rainfall_24h_mm"),
+            },
+            "provenance": {
+                "type": provenance_record.get("type", "UNAVAILABLE"),
+                "source": provenance_record.get("source"),
+            },
+        },
+        "limitations": limitations,
+    }
 
 
 def _public_candidate_detection(candidate_detection):
@@ -227,6 +618,23 @@ def _run_integrated_monitoring(region_key, start_date=None, end_date=None, mode=
         processed_at=processed_at,
     )
     result["requested_date_range"] = {"start": start_date, "end": end_date}
+    if mode == "monitoring":
+        result["weather"] = fetch_weather_observation(
+            region["latitude"], region["longitude"]
+        )
+        result["weather"]["region"] = region_key
+        automated_downstream = fetch_automated_downstream_context(
+            region_key,
+            region["latitude"],
+            region["longitude"],
+            geometry=bounds,
+        )
+        result["downstream_impact"] = build_downstream_impact(
+            region_key, region, automated_downstream
+        )
+        result["impact_mapping"] = build_impact_mapping(
+            region_key, region, automated_downstream
+        )
 
     reliability = GEEReliabilityLayer()
     initialization = reliability.execute(
@@ -804,6 +1212,7 @@ def _run_integrated_monitoring(region_key, start_date=None, end_date=None, mode=
         seasonal_comparison or {"status": "NOT_AVAILABLE"},
         temporal_evidence=None,
     )
+    result["satellite_change_evidence"]["region"] = region_key
 
     engine = RiskEngine()
     sensor_readings = None
@@ -881,6 +1290,17 @@ def _run_integrated_monitoring(region_key, start_date=None, end_date=None, mode=
         "data_quality": data_quality
     }
     satellite_signal = engine.calculate_satellite_signal(satellite_signal_inputs)
+    weather = result.get("weather") or {}
+    weather_signal = weather.get("signal") if weather.get("status") == "SUCCESS" else None
+    if mode == "monitoring" and isinstance(weather_signal, (int, float)):
+        sensor_signal = weather_signal
+        weather["used_for_risk_signal"] = True
+        weather["risk_signal"] = weather_signal
+    elif mode == "monitoring":
+        weather["used_for_risk_signal"] = False
+    previous_change = _previous_observation_change(
+        ObservationStore(), region_key, current_area_sqkm
+    )
     seasonal_baseline_mean = (
         ((seasonal_comparison or {}).get("baseline") or {})
         .get("statistics", {})
@@ -888,15 +1308,22 @@ def _run_integrated_monitoring(region_key, start_date=None, end_date=None, mode=
     )
     percent_change = (seasonal_comparison or {}).get("deviation_percentage")
     result["satellite_change"] = {
+        "region": region_key,
         "current_area_sqkm": current_area_sqkm,
-        "previous_area_sqkm": None,
+        "previous_area_sqkm": previous_change["previous_area_sqkm"],
+        "previous_observation_id": previous_change["previous_observation_id"],
+        "previous_acquisition_time": previous_change["previous_acquisition_time"],
+        "previous_observation_percent_change": previous_change[
+            "previous_observation_percent_change"
+        ],
         "seasonal_baseline_mean_sqkm": seasonal_baseline_mean,
         "seasonal_baseline": (seasonal_comparison or {}).get("baseline"),
         "percent_change": percent_change,
+        "trend": previous_change["trend"],
         "satellite_risk_signal": satellite_signal,
         "data_quality_confidence": data_quality["confidence"],
-        "status": "CALCULATED" if comparison_valid else "NOT_AVAILABLE",
-        "note": "Deviation is against a multi-date same-calendar-month historical baseline"
+        "status": "CALCULATED" if comparison_valid or previous_change["trend"] else "NOT_AVAILABLE",
+        "note": "Previous-observation change is separate from the seasonal historical baseline"
     }
     result["sensors"] = sensor_readings or {
         "status": "NOT_RUN",
@@ -918,6 +1345,16 @@ def _run_integrated_monitoring(region_key, start_date=None, end_date=None, mode=
         sensor_signal,
         region_key,
     )
+    result["risk"]["signal_sources"] = {
+        "satellite": "Sentinel-2 NDWI and water-area evidence",
+        "ai": "Generic YOLO is not a GLOF-domain signal",
+        "sensor": "Open-Meteo rainfall" if weather.get("used_for_risk_signal") else "Unavailable",
+    }
+    result["risk_change_explanation"] = _risk_change_explanation(
+        ObservationStore(), region_key, result
+    )
+    _validate_nested_region_identity(result, region_key)
+    result["data_confidence"] = _data_confidence_summary(result)
     result["status"] = "SUCCESS"
     result["validity_status"] = "VALID"
     return result
@@ -936,6 +1373,12 @@ def run_integrated_monitoring(region_key, start_date=None, end_date=None, mode="
             return {"ok": False, "status": "UNAVAILABLE", "reason": str(exc)}
         if not isinstance(observation, dict):
             return {"ok": False, "status": "UNAVAILABLE", "reason": "Monitoring returned no observation envelope"}
+        if region_key in HIMALAYAN_REGIONS:
+            try:
+                validate_observation(observation, region_key)
+                _validate_nested_region_identity(observation, region_key)
+            except ValueError as exc:
+                return {"ok": False, "status": "REGION_INTEGRITY_ERROR", "reason": str(exc)}
         if observation.get("validity_status") == "UNAVAILABLE":
             return {"ok": False, "status": "UNAVAILABLE", "reason": observation.get("reason", "Observation is unavailable")}
         if observation.get("status") in {
@@ -998,10 +1441,53 @@ def run_integrated_monitoring(region_key, start_date=None, end_date=None, mode="
     def early_warning_status(context):
         observation = context["observation"]
         status_result = evaluate_early_warning_status(observation)
-        if status_result.get("status") == INSUFFICIENT_DATA:
-            return {"ok": False, "status": INSUFFICIENT_DATA, "reason": "; ".join(status_result.get("reasons", [])), "context": {"early_warning_status": status_result}}
         updated_observation = deepcopy(observation)
         updated_observation["early_warning_status"] = status_result
+        try:
+            historical = ObservationStore().list(observation.get("region"), limit=500)
+            current_id = observation.get("observation_id")
+            historical = [
+                record for record in historical
+                if record.get("observation_id") != current_id
+            ]
+            updated_observation["alert_confirmation"] = evaluate_warning_confirmation(
+                updated_observation, historical
+            )
+            updated_observation["alert_confirmation"]["region"] = observation.get("region")
+        except Exception as exc:
+            updated_observation["alert_confirmation"] = {
+                "region": observation.get("region"),
+                "state": "NO_ACTIVE_WARNING",
+                "warning_status": status_result.get("status"),
+                "confirmed": False,
+                "persistent": False,
+                "reason": f"Confirmation history is unavailable: {exc}",
+            }
+        updated_observation["human_warning"] = build_human_warning(
+            updated_observation, status_result
+        )
+        if updated_observation.get("observation_id"):
+            try:
+                ObservationStore().update_observation_payload(
+                    updated_observation["observation_id"],
+                    {
+                        "early_warning_status": updated_observation["early_warning_status"],
+                        "alert_confirmation": updated_observation["alert_confirmation"],
+                        "human_warning": updated_observation["human_warning"],
+                    },
+                )
+            except Exception:
+                pass
+        if status_result.get("status") == INSUFFICIENT_DATA:
+            return {
+                "ok": False,
+                "status": INSUFFICIENT_DATA,
+                "reason": "; ".join(status_result.get("reasons", [])),
+                "context": {
+                    "observation": updated_observation,
+                    "early_warning_status": status_result,
+                },
+            }
         return {"ok": True, "status": status_result["status"], "context": {"observation": updated_observation, "early_warning_status": status_result}}
 
     manager = MonitoringExecutionManager({
@@ -1019,6 +1505,7 @@ def run_integrated_monitoring(region_key, start_date=None, end_date=None, mode="
     }
     observation = execution.get("context", {}).get("observation")
     if execution["job_status"] == "SUCCEEDED":
+        _validate_nested_region_identity(observation, region_key)
         observation["execution"] = execution_summary
         return observation
     if isinstance(observation, dict):
@@ -1410,7 +1897,7 @@ def _run_temporal_evidence(region_key, start_date, end_date, max_observations=6)
             "Temporal workflow does not independently establish named-lake identity or complete risk evidence"
         ],
     }
-    return {
+    temporal_result = {
         "status": "SUCCESS",
         "region": region_key,
         "region_name": region["name"],
@@ -1447,6 +1934,11 @@ def _run_temporal_evidence(region_key, start_date, end_date, max_observations=6)
             limitations=["Temporal persistence does not prove named-lake identity without independent validation"],
         ),
     }
+    temporal_result["data_confidence"] = _data_confidence_summary(temporal_result)
+    temporal_result["human_warning"] = build_human_warning(
+        temporal_result, temporal_early_warning
+    )
+    return temporal_result
 
 
 def _run_tsho_rolpa_temporal_evidence(start_date, end_date, max_observations=6):
@@ -1483,6 +1975,8 @@ def run_temporal_evidence(region_key, start_date, end_date, max_observations=6):
                 limitations=["No usable multi-date satellite evidence was produced"],
             ),
         }
+    result["data_confidence"] = _data_confidence_summary(result)
+    result["human_warning"] = build_human_warning(result)
     try:
         record = ObservationStore().save_temporal_evidence(result)
         result["persistence"] = {
@@ -1527,6 +2021,8 @@ def run_tsho_rolpa_temporal_evidence(start_date, end_date, max_observations=6):
                 limitations=["No usable multi-date satellite evidence was produced"],
             ),
         }
+    result["data_confidence"] = _data_confidence_summary(result)
+    result["human_warning"] = build_human_warning(result)
     try:
         record = ObservationStore().save_temporal_evidence(result)
         result["persistence"] = {
@@ -1594,6 +2090,7 @@ def nepal_telemetry_to_integrated_result(scenario, telemetry, region_key=NEPAL_D
         "water_area": {"area_sqkm": lake_area},
     }
     result["satellite_change"] = {
+        "region": region_key,
         "status": "simulated" if previous_area is not None else "NOT_AVAILABLE",
         "simulated": True,
         "current_area_sqkm": lake_area,
@@ -1639,6 +2136,15 @@ def nepal_telemetry_to_integrated_result(scenario, telemetry, region_key=NEPAL_D
     })
     result["risk"] = risk
     result["history"] = list(scenario.risk_engine.history)
+    result["data_confidence"] = _data_confidence_summary(result)
+    result["human_warning"] = build_human_warning(
+        result,
+        {
+            "status": "UNCONFIRMED",
+            "reasons": ["This is a scripted simulation, not a verified warning observation."],
+            "evidence_state": {"risk_assessment_status": risk.get("assessment_status")},
+        },
+    )
     return result
 
 

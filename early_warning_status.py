@@ -54,6 +54,7 @@ def _status_result(status, reasons, observation, risk, evidence_state):
     limitations = list((provenance or {}).get("limitations") or [])
     limitations.extend(risk.get("assumptions") or [])
     return {
+        "region": observation.get("region"),
         "status": status,
         "reasons": reasons,
         "evidence_state": evidence_state,
@@ -209,3 +210,110 @@ def evaluate_early_warning_status(observation):
         risk,
         evidence_state,
     )
+
+
+_HUMAN_WARNING_LABELS = {
+    NORMAL: "NORMAL",
+    WATCH: "WATCH",
+    WARNING: "WARNING",
+    UNCONFIRMED: "UNCONFIRMED",
+    INSUFFICIENT_DATA: "INSUFFICIENT DATA",
+}
+
+_HUMAN_WARNING_ACTIONS = {
+    NORMAL: "Continue routine monitoring.",
+    WATCH: "Increase monitoring and review the latest observations.",
+    WARNING: "Review downstream exposure and prepare the warning workflow.",
+    UNCONFIRMED: "Do not issue a confirmed warning until the lake identity and evidence are verified.",
+    INSUFFICIENT_DATA: "Obtain usable observations before making a warning decision; do not interpret missing data as safety.",
+}
+
+
+def build_human_warning(observation, status_result=None):
+    """Build a plain-language warning without exposing technical risk scoring."""
+    observation = observation if isinstance(observation, dict) else {}
+    status_result = status_result or evaluate_early_warning_status(observation)
+    status = status_result.get("status", INSUFFICIENT_DATA)
+    risk = observation.get("risk") or {}
+    satellite = observation.get("satellite") or {}
+    change = observation.get("satellite_change") or {}
+    evidence = status_result.get("evidence_state") or {}
+    reasons = list(status_result.get("reasons") or [])
+    supporting_evidence = []
+
+    current_area = change.get("current_area_sqkm")
+    previous_area = change.get("previous_area_sqkm")
+    area_percent = change.get("previous_observation_percent_change")
+    area_trend = change.get("trend")
+    if isinstance(current_area, (int, float)):
+        supporting_evidence.append(f"Current observed water area: {current_area:.3f} km².")
+    if isinstance(previous_area, (int, float)) and isinstance(area_percent, (int, float)):
+        supporting_evidence.append(
+            f"Water area is {area_trend or 'UNCHANGED'} by {abs(area_percent):.1f}% compared with the previous valid observation."
+        )
+    if satellite.get("acquisition_time"):
+        supporting_evidence.append(
+            f"Latest satellite observation: {satellite['acquisition_time']}."
+        )
+    if satellite.get("quality_masking", {}).get("status") == "APPLIED":
+        supporting_evidence.append("Satellite quality masking was applied.")
+    identity = evidence.get("identity_status")
+    if identity:
+        supporting_evidence.append(f"Lake identity status: {identity}.")
+    baseline = (satellite.get("seasonal_comparison") or {}).get("status")
+    if baseline:
+        supporting_evidence.append(f"Historical baseline status: {baseline}.")
+    weather = observation.get("weather") or {}
+    if weather.get("status") == "SUCCESS":
+        rainfall = weather.get("rainfall_mmph")
+        rainfall_text = (
+            f"Current rainfall: {rainfall:.1f} mm/h."
+            if isinstance(rainfall, (int, float))
+            else "Current rainfall observation is available."
+        )
+        supporting_evidence.append(
+            f"Weather evidence from {weather.get('source', 'external weather service')}: {rainfall_text}"
+        )
+    else:
+        reasons.append(
+            f"Weather evidence is {weather.get('status', 'UNAVAILABLE').lower()} and was not treated as safe conditions."
+        )
+    downstream = observation.get("downstream_impact") or {}
+    if downstream.get("status") in {"REFERENCE_CONTEXT", "COMMUNITY_DATA"}:
+        supporting_evidence.append("Downstream exposure context is available for impact review.")
+    else:
+        reasons.append("Downstream impact mapping is unavailable; this does not mean there is no downstream exposure.")
+    impact_mapping = observation.get("impact_mapping") or {}
+    if impact_mapping.get("status") == "SCREENING_APPROXIMATE":
+        supporting_evidence.append("Approximate downstream impact screening is available for review.")
+    confidence = (observation.get("data_confidence") or {}).get("level")
+    if confidence:
+        supporting_evidence.append(f"Data confidence: {confidence}.")
+
+    if not supporting_evidence:
+        supporting_evidence.append("No supporting observation evidence is available.")
+
+    confirmation = observation.get("alert_confirmation") or {}
+    confirmation_state = confirmation.get("state", "NO_ACTIVE_WARNING")
+    if confirmation_state not in {"NO_ACTIVE_WARNING", "RESOLVED"}:
+        supporting_evidence.append(f"Alert progression: {confirmation_state}.")
+
+    return {
+        "region": observation.get("region"),
+        "status": status,
+        "level": _HUMAN_WARNING_LABELS.get(status, status),
+        "message": {
+            NORMAL: "No immediate warning indicated by the available evidence.",
+            WATCH: "Conditions require closer monitoring.",
+            WARNING: "The available verified evidence supports a warning condition.",
+            UNCONFIRMED: "A potential concern exists, but the evidence is not sufficiently confirmed.",
+            INSUFFICIENT_DATA: "A warning decision cannot be made from the available evidence.",
+        }.get(status, "A warning decision cannot be made from the available evidence."),
+        "reasons": reasons or ["No specific warning reason was recorded."],
+        "supporting_evidence": supporting_evidence,
+        "recommended_action": _HUMAN_WARNING_ACTIONS.get(
+            status, _HUMAN_WARNING_ACTIONS[INSUFFICIENT_DATA]
+        ),
+        "confirmation_state": confirmation_state,
+        "technical_details_separate": True,
+    }
