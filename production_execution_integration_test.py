@@ -101,6 +101,56 @@ def test_api_monitor_propagates_quality_failure_and_skips_downstream():
     assert store.saves == 0
 
 
+def test_api_monitor_preserves_insufficient_data_status():
+    store = _Store()
+    observation = _observation()
+    observation["satellite"]["seasonal_comparison"] = {
+        "status": "INSUFFICIENT_HISTORICAL_DATA"
+    }
+    client = app.test_client()
+    with patch("main._run_integrated_monitoring", return_value=observation), patch(
+        "main.ObservationStore", return_value=store
+    ):
+        response = client.get("/api/monitor/Tsho_Rolpa_Nepal")
+
+    body = response.get_json()
+    assert response.status_code == 200
+    assert body["execution"]["failed_stage"] == "SEASONAL_BASELINE_COMPARISON"
+    assert body["status"] == "INSUFFICIENT_DATA"
+    assert body["validity_status"] == "UNAVAILABLE"
+    assert store.saves == 1
+
+
+def test_api_monitor_completes_with_limited_risk_confidence():
+    store = _Store()
+    observation = _observation()
+    observation["risk"] = {
+        "risk_level": "UNKNOWN",
+        "assessment_status": "LIMITED_CONFIDENCE",
+        "decision_support_status": "LIMITED_DATA",
+        "confidence": "LIMITED",
+        "unavailable_information": ["sensor signal was not supplied"],
+        "missing_inputs": ["sensor"],
+        "simulated_signals": [],
+        "assumptions": [],
+        "explanation": "No complete evidence basis is available for a definitive risk level.",
+    }
+    client = app.test_client()
+    with patch("main._run_integrated_monitoring", return_value=observation), patch(
+        "main.ObservationStore", return_value=store
+    ):
+        response = client.get("/api/monitor/Imja_Tsho_Nepal")
+
+    body = response.get_json()
+    assert response.status_code == 200
+    assert body["execution"]["job_status"] == "SUCCEEDED"
+    assert body["execution"]["failed_stage"] is None
+    assert body["execution"]["system_status"] == "INSUFFICIENT_DATA"
+    assert body["risk"]["risk_level"] == "UNKNOWN"
+    assert body["risk"]["assessment_status"] == "LIMITED_CONFIDENCE"
+    assert store.saves == 1
+
+
 if __name__ == "__main__":
     test_api_monitor_invokes_manager_and_runs_all_stages_in_order()
     test_api_monitor_propagates_quality_failure_and_skips_downstream()

@@ -7,7 +7,7 @@ Handles connection to GEE and satellite imagery processing.
 
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 # Import Earth Engine
@@ -47,9 +47,14 @@ class GEEAuthenticator:
             project_id = os.getenv("GEE_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
             if self.credentials_path and os.path.exists(self.credentials_path):
                 # Service account authentication
+                with open(self.credentials_path, "r", encoding="utf-8") as credentials_file:
+                    credentials_data = json.load(credentials_file)
+                service_account_email = credentials_data.get("client_email")
+                if not service_account_email:
+                    raise ValueError("GEE service-account JSON has no client_email")
                 ee.Initialize(
                     ee.ServiceAccountCredentials(
-                        email=None,
+                        email=service_account_email,
                         key_file=self.credentials_path
                     ),
                     project=project_id
@@ -202,8 +207,22 @@ class Sentinel2Pipeline:
             "final_range": None,
             "cloud_cover_relaxed": False,
             "fallback_used": False,
-            "coverage_geometry_verified": coverage_geometry is not None
+            "coverage_geometry_verified": coverage_geometry is not None,
+            "selected_image": None,
         }
+
+        def record_selected_image():
+            properties = (self.last_metadata or {}).get("properties", {})
+            acquisition_ms = properties.get("system:time_start")
+            acquisition_time = (
+                datetime.fromtimestamp(acquisition_ms / 1000, timezone.utc).isoformat()
+                if acquisition_ms
+                else None
+            )
+            search_metadata["selected_image"] = {
+                "image_id": properties.get("system:index"),
+                "acquisition_time": acquisition_time,
+            }
         
         # Strategy 1: Try exact range with strict cloud cover
         print(f"→ Attempt 1: Exact range {start_date.date()} to {end_date.date()}, cloud ≤ {cloud_cover_max}%")
@@ -218,6 +237,7 @@ class Sentinel2Pipeline:
         
         if image:
             search_metadata["final_range"] = search_metadata["original_range"]
+            record_selected_image()
             return image, search_metadata
         
         # Strategy 2: Sliding window expansion
@@ -244,6 +264,7 @@ class Sentinel2Pipeline:
             if image:
                 search_metadata["final_range"] = f"{expanded_start.date()} to {expanded_end.date()}"
                 search_metadata["fallback_used"] = True
+                record_selected_image()
                 return image, search_metadata
             
             current_window += window_increment
@@ -271,6 +292,7 @@ class Sentinel2Pipeline:
                 search_metadata["final_range"] = f"{max_start.date()} to {max_end.date()}"
                 search_metadata["cloud_cover_relaxed"] = True
                 search_metadata["fallback_used"] = True
+                record_selected_image()
                 return image, search_metadata
         
         # All strategies failed

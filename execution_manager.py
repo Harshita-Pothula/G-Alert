@@ -129,6 +129,11 @@ class MonitoringExecutionManager:
             "completed_stages": list(completed),
             "skipped_stages": list(STAGE_ORDER[failed_index + 1:]),
             "failed_stage": failed_stage,
+            "failure_status": (
+                stage_results[-1].get("status")
+                if stage_results and stage_results[-1].get("stage") == failed_stage
+                else "ERROR"
+            ),
             "failure_reason": str(reason),
             "system_status": INSUFFICIENT_DATA,
             "stages": stage_results,

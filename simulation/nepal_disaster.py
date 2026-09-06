@@ -76,7 +76,15 @@ class NepalDisasterScenario:
             satellite_signal=satellite_signal,
             ai_signal=ai_signal,
             sensor_signal=sensor_signal,
-            region="Nepal"
+            region="Nepal",
+            evidence={
+                "explanation_sources": {
+                    "satellite": {"status": "SIMULATED", "simulated": True},
+                    "weather": {"status": "UNAVAILABLE"},
+                    "sensor": {"status": "SIMULATED", "simulated": True},
+                    "ai": {"status": "SIMULATED", "simulated": True},
+                },
+            },
         )
 
         # Keep scripted event["risk_level"] / event["risk_score"] as placeholders.

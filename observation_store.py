@@ -80,6 +80,34 @@ class ObservationStore:
                 "CREATE INDEX IF NOT EXISTS idx_temporal_region_time "
                 "ON temporal_evidence_runs(region, recorded_at DESC)"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sensor_telemetry (
+                    telemetry_id TEXT PRIMARY KEY,
+                    deduplication_key TEXT NOT NULL UNIQUE,
+                    sensor_id TEXT NOT NULL,
+                    region_key TEXT NOT NULL,
+                    sensor_type TEXT NOT NULL,
+                    telemetry_timestamp TEXT NOT NULL,
+                    reading_value REAL NOT NULL,
+                    reading_unit TEXT NOT NULL,
+                    sequence INTEGER,
+                    received_at TEXT NOT NULL,
+                    freshness TEXT NOT NULL,
+                    simulated INTEGER,
+                    provenance_json TEXT,
+                    payload_json TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sensor_telemetry_sensor_time "
+                "ON sensor_telemetry(sensor_id, telemetry_timestamp DESC)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sensor_telemetry_region_time "
+                "ON sensor_telemetry(region_key, telemetry_timestamp DESC)"
+            )
             columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(observations)")
             }
@@ -215,6 +243,170 @@ class ObservationStore:
                 "UPDATE observations SET payload_json = ? WHERE observation_id = ?",
                 (json.dumps(payload, sort_keys=True, allow_nan=False), observation_id),
             )
+            connection.execute(
+                """
+                UPDATE observations
+                SET status = ?,
+                    satellite_status = ?,
+                    identity_status = ?,
+                    decision_support_status = ?,
+                    measurement_status = ?
+                WHERE observation_id = ?
+                """,
+                (
+                    payload.get("status", "UNKNOWN"),
+                    (payload.get("satellite") or {}).get("status"),
+                    (payload.get("temporal_evidence") or {}).get("identity_status")
+                    or ((payload.get("satellite") or {}).get("candidate_detection") or {}).get("identity_status")
+                    or payload.get("identity_status"),
+                    (payload.get("decision_support") or {}).get("status"),
+                    (payload.get("observed_measurement") or {}).get("status"),
+                    observation_id,
+                ),
+            )
+
+    def save_sensor_telemetry(self, telemetry_result, source_payload=None):
+        """Persist one accepted telemetry result without changing observation records."""
+        if not isinstance(telemetry_result, dict):
+            raise ValueError("telemetry_result must be a dictionary")
+        if telemetry_result.get("ingestion_status") != "ACCEPTED":
+            raise ValueError("only accepted telemetry can be persisted")
+
+        payload = telemetry_result.get("payload")
+        if not isinstance(payload, dict):
+            raise ValueError("accepted telemetry payload is required")
+        required = ("sensor_id", "region_key", "sensor_type", "timestamp", "reading")
+        if any(field not in payload for field in required):
+            raise ValueError("accepted telemetry payload is incomplete")
+        require_valid_region(payload["region_key"])
+        reading = payload["reading"]
+        if not isinstance(reading, dict) or "value" not in reading or "unit" not in reading:
+            raise ValueError("accepted telemetry reading is incomplete")
+
+        stored_payload = dict(payload)
+        if isinstance(source_payload, dict):
+            if isinstance(source_payload.get("simulated"), bool):
+                stored_payload["simulated"] = source_payload["simulated"]
+            if isinstance(source_payload.get("provenance"), (str, dict)):
+                stored_payload["provenance"] = source_payload["provenance"]
+
+        sequence = payload.get("sequence")
+        if sequence is not None:
+            deduplication_key = json.dumps(
+                ["sequence", payload["sensor_id"], payload["timestamp"], sequence],
+                separators=(",", ":"),
+            )
+        else:
+            deduplication_key = json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+            )
+
+        telemetry_id = str(uuid.uuid4())
+        received_at = telemetry_result.get("received_at")
+        if not isinstance(received_at, str):
+            raise ValueError("accepted telemetry received_at is required")
+        freshness = telemetry_result.get("freshness")
+        if not isinstance(freshness, str):
+            raise ValueError("accepted telemetry freshness is required")
+        provenance = stored_payload.get("provenance")
+        provenance_json = (
+            json.dumps(provenance, sort_keys=True, allow_nan=False)
+            if provenance is not None else None
+        )
+        simulated = stored_payload.get("simulated")
+
+        with self._connection() as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO sensor_telemetry (
+                        telemetry_id, deduplication_key, sensor_id, region_key,
+                        sensor_type, telemetry_timestamp, reading_value,
+                        reading_unit, sequence, received_at, freshness,
+                        simulated, provenance_json, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        telemetry_id,
+                        deduplication_key,
+                        payload["sensor_id"],
+                        payload["region_key"],
+                        payload["sensor_type"],
+                        payload["timestamp"],
+                        reading["value"],
+                        reading["unit"],
+                        sequence,
+                        received_at,
+                        freshness,
+                        int(simulated) if isinstance(simulated, bool) else None,
+                        provenance_json,
+                        json.dumps(stored_payload, sort_keys=True, allow_nan=False),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                return {"persisted": False, "duplicate": True}
+        return {"persisted": True, "duplicate": False, "telemetry_id": telemetry_id}
+
+    @staticmethod
+    def _sensor_row(row):
+        payload = json.loads(row["payload_json"])
+        return {
+            "telemetry_id": row["telemetry_id"],
+            "sensor_id": row["sensor_id"],
+            "region_key": row["region_key"],
+            "sensor_type": row["sensor_type"],
+            "timestamp": row["telemetry_timestamp"],
+            "reading": {
+                "value": row["reading_value"],
+                "unit": row["reading_unit"],
+            },
+            "sequence": row["sequence"],
+            "received_at": row["received_at"],
+            "freshness": row["freshness"],
+            "simulated": bool(row["simulated"]) if row["simulated"] is not None else None,
+            "provenance": json.loads(row["provenance_json"])
+            if row["provenance_json"] is not None else None,
+            "payload": payload,
+        }
+
+    def get_latest_sensor_reading(self, sensor_id):
+        """Return the latest persisted reading for one sensor, if available."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT telemetry_id, sensor_id, region_key, sensor_type,
+                       telemetry_timestamp, reading_value, reading_unit,
+                       sequence, received_at, freshness, simulated,
+                       provenance_json, payload_json
+                FROM sensor_telemetry
+                WHERE sensor_id = ?
+                ORDER BY telemetry_timestamp DESC, received_at DESC
+                LIMIT 1
+                """,
+                (sensor_id,),
+            ).fetchone()
+        return self._sensor_row(row) if row else None
+
+    def list_sensor_telemetry(self, region_key, limit=50):
+        """Return recent persisted telemetry for one configured region."""
+        require_valid_region(region_key)
+        if not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise ValueError("limit must be an integer from 1 to 500")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT telemetry_id, sensor_id, region_key, sensor_type,
+                       telemetry_timestamp, reading_value, reading_unit,
+                       sequence, received_at, freshness, simulated,
+                       provenance_json, payload_json
+                FROM sensor_telemetry
+                WHERE region_key = ?
+                ORDER BY telemetry_timestamp DESC, received_at DESC
+                LIMIT ?
+                """,
+                (region_key, limit),
+            ).fetchall()
+        return [self._sensor_row(row) for row in rows]
 
     def save_temporal_evidence(self, evidence_run):
         """Persist a complete multi-date evidence run and its source acquisitions."""

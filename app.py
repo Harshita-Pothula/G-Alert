@@ -22,6 +22,7 @@ from main import (
 from simulation.sensor_simulator import SensorNetwork
 from risk_engine import RiskEngine
 from observation_store import ObservationStore
+from sensor_telemetry import SensorTelemetryService
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend consumption
@@ -29,6 +30,8 @@ CORS(app)  # Enable CORS for frontend consumption
 # Configuration
 app.config['JSON_SORT_KEYS'] = False
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = True
+
+sensor_telemetry_service = SensorTelemetryService()
 
 
 def _validated_signal(data, name, default):
@@ -337,6 +340,85 @@ def monitor_multiple_regions_temporal():
 # SENSOR INTEGRATION ENDPOINTS
 # ============================================================================
 
+@app.route('/api/sensors/telemetry', methods=['POST'])
+def ingest_sensor_telemetry():
+    """Validate and classify one real or simulated sensor telemetry payload."""
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return jsonify({
+            "status": "error",
+            "error": "Request must contain a valid JSON payload",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }), 400
+
+    result = sensor_telemetry_service.ingest(payload)
+    ingestion_status = result.get("ingestion_status")
+    if ingestion_status == "ACCEPTED":
+        try:
+            persistence = ObservationStore().save_sensor_telemetry(
+                result, source_payload=payload
+            )
+        except Exception as exc:
+            return jsonify({
+                "status": "error",
+                "error": f"Telemetry could not be persisted: {exc}",
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            }), 500
+        if persistence.get("duplicate"):
+            result = {
+                **result,
+                "ingestion_status": "DUPLICATE",
+                "duplicate": True,
+            }
+            return jsonify({"status": "error", **result}), 409
+        result["persistence"] = persistence
+        return jsonify({"status": "success", **result}), 200
+    if ingestion_status == "DUPLICATE":
+        return jsonify({"status": "error", **result}), 409
+    return jsonify({"status": "error", **result}), 422
+
+
+@app.route('/api/sensors/telemetry/<sensor_id>/latest', methods=['GET'])
+def get_latest_sensor_telemetry(sensor_id):
+    """Return the latest persisted reading for one sensor."""
+    reading = ObservationStore().get_latest_sensor_reading(sensor_id)
+    if reading is None:
+        return jsonify({
+            "status": "error",
+            "error": f"No telemetry found for sensor '{sensor_id}'",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }), 404
+    return jsonify({
+        "status": "success",
+        "data_source": "PERSISTED_SENSOR_TELEMETRY",
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "reading": reading,
+    })
+
+
+@app.route('/api/sensors/telemetry/<region_key>/history', methods=['GET'])
+def get_sensor_telemetry_history(region_key):
+    """Return recent persisted telemetry for one configured region."""
+    if get_region_info(region_key) is None:
+        return jsonify({
+            "status": "error",
+            "error": f"Region '{region_key}' not found",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }), 404
+    limit = request.args.get('limit', default=50, type=int)
+    try:
+        readings = ObservationStore().list_sensor_telemetry(region_key, limit)
+    except ValueError as exc:
+        return jsonify({"status": "error", "error": str(exc)}), 400
+    return jsonify({
+        "status": "success",
+        "data_source": "PERSISTED_SENSOR_TELEMETRY",
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "region": region_key,
+        "count": len(readings),
+        "readings": readings,
+    })
+
 @app.route('/api/sensors/simulate', methods=['POST'])
 def simulate_sensors():
     """
@@ -366,7 +448,7 @@ def simulate_sensors():
 
 @app.route('/api/sensors/status/<region_key>', methods=['GET'])
 def get_sensor_status(region_key):
-    """Return sensor network status for a region (placeholder for real sensor integration)."""
+    """Return known sensor health for a configured region."""
     region = get_region_info(region_key)
     
     if region is None:
@@ -376,19 +458,23 @@ def get_sensor_status(region_key):
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }), 404
     
-    # Placeholder for real sensor integration
+    sensors = [
+        status for status in sensor_telemetry_service.get_health_snapshot().values()
+        if status.get("region_key") == region_key
+    ]
     return jsonify({
         "status": "success",
-        "data_source": "SENSOR_STATUS_PLACEHOLDER",
+        "data_source": "SENSOR_TELEMETRY",
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "region": region_key,
         "sensor_network_status": {
             "network_id": f"{region_key.upper()}_SENSOR_NETWORK",
-            "sensors_deployed": 0,
-            "sensors_active": 0,
-            "last_reading": None,
-            "integration_status": "PENDING_HARDWARE_TEAM",
-            "note": "Real sensor integration pending hardware team deployment"
+            "sensors_deployed": len(sensors),
+            "sensors_active": sum(
+                status.get("status") == "ONLINE" for status in sensors
+            ),
+            "sensors": sensors,
+            "integration_status": "ACTIVE" if sensors else "NO_READINGS",
         }
     })
 

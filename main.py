@@ -82,6 +82,8 @@ INTEGRATED_RESULT_KEYS = (
     "history",
 )
 
+SENSOR_TELEMETRY_STALE_AFTER_SECONDS = 300
+
 
 def _date_range(start_date, end_date):
     """Resolve an explicit range or a recent range for a latest-image request."""
@@ -198,6 +200,12 @@ def _integrated_result_skeleton(region_key, status, mode="monitoring", reason=No
         },
         "satellite_change": {"region": region_key, "status": "NOT_AVAILABLE"},
         "satellite_change_evidence": {"region": region_key, "status": "NOT_AVAILABLE"},
+        "cross_validation": {
+            "status": "NOT_AVAILABLE",
+            "region": region_key,
+            "checks": {},
+            "explanation": "No complete real-evidence comparison was performed.",
+        },
         "risk_change_explanation": {"region": region_key, "status": "NOT_AVAILABLE"},
         "human_warning": {
             "region": region_key,
@@ -229,7 +237,7 @@ def _integrated_result_skeleton(region_key, status, mode="monitoring", reason=No
         "sensors": {
             "status": "NOT_RUN",
             "note": "Virtual sensors run only in simulation mode",
-            "simulated": True,
+            "simulated": False,
         },
         "ai": {
             "status": "NOT_AVAILABLE",
@@ -272,18 +280,194 @@ def _validate_nested_region_identity(observation, region_key):
                 )
 
 
-def _attach_risk_and_history(result, engine, satellite_signal, ai_signal, sensor_signal, region_key):
+def _attach_risk_and_history(
+    result, engine, satellite_signal, ai_signal, sensor_signal, region_key,
+    weather_signal=None, weather_signal_provided=False,
+):
     """Record one RiskEngine assessment and expose instance history on the result."""
-    risk = engine.assess_risk(
-        satellite_signal=satellite_signal,
-        ai_signal=ai_signal,
-        sensor_signal=sensor_signal,
-        region=region_key,
-    )
+    risk_arguments = {
+        "satellite_signal": satellite_signal,
+        "ai_signal": ai_signal,
+        "sensor_signal": sensor_signal,
+        "region": region_key,
+    }
+    if weather_signal_provided:
+        risk_arguments["weather_signal"] = weather_signal
+    explanation_sources = _risk_explanation_sources(result)
+    risk_arguments["evidence"] = {
+        "explanation_sources": explanation_sources,
+        "observed_evidence": _risk_observed_evidence(explanation_sources),
+    }
+    risk = engine.assess_risk(**risk_arguments)
     risk.update({"region": region_key, "source": "prototype_demo_logic"})
     result["risk"] = risk
     result["history"] = list(engine.history)
     return result
+
+
+def _risk_explanation_sources(observation):
+    """Expose existing source metadata to RiskEngine explanation formatting."""
+    satellite = observation.get("satellite") or {}
+    weather = observation.get("weather") or {}
+    sensors = observation.get("sensors") or {}
+    ai = observation.get("ai") or {}
+    satellite_change = observation.get("satellite_change") or {}
+    return {
+        "satellite": {
+            "status": satellite.get("status"),
+            "provenance": satellite.get("provenance"),
+            "details": {
+                "ndwi_value": satellite.get("ndwi_value"),
+                "current_area_sqkm": satellite_change.get("current_area_sqkm"),
+                "previous_area_sqkm": satellite_change.get("previous_area_sqkm"),
+                "previous_change_status": satellite_change.get("trend"),
+                "seasonal_baseline_status": (satellite.get("seasonal_comparison") or {}).get("status"),
+                "identity_status": (satellite.get("candidate_detection") or {}).get("identity_status"),
+            },
+        },
+        "weather": {
+            "status": weather.get("status"),
+            "provenance": weather.get("provenance"),
+            "summary": (
+                f"Open-Meteo rainfall was {weather.get('rainfall_mmph')} mm/h "
+                f"and did not affect the current weighted risk calculation."
+                if weather.get("status") == "SUCCESS" else None
+            ),
+            "details": {
+                "rainfall_mmph": weather.get("rainfall_mmph"),
+                "rainfall_24h_mm": weather.get("rainfall_24h_mm"),
+                "source": weather.get("source"),
+            },
+        },
+        "sensor": {
+            "status": sensors.get("status"),
+            "simulated": sensors.get("simulated") is True,
+            "provenance": sensors.get("provenance"),
+            "details": {
+                "freshness": sensors.get("freshness"),
+                "fresh_reading_count": len(sensors.get("readings") or []),
+                "stale_reading_count": len(sensors.get("stale_readings") or []),
+            },
+        },
+        "ai": {
+            "status": ai.get("status"),
+            "simulated": ai.get("simulated") is True,
+            "provenance": ai.get("provenance"),
+            "details": {
+                "model": ai.get("model"),
+                "detector_type": ai.get("detector_type"),
+                "detection_count": ai.get("detection_count"),
+            },
+        },
+    }
+
+
+def _risk_observed_evidence(source_context):
+    """List only real, available sources eligible as observed alert evidence."""
+    observed = []
+    satellite = source_context.get("satellite") or {}
+    satellite_provenance = satellite.get("provenance") or {}
+    if (
+        satellite.get("status") == "SUCCESS"
+        and satellite_provenance.get("type") in {
+            REAL_SATELLITE_DATA, DERIVED_FROM_REAL_DATA
+        }
+    ):
+        observed.append("real Sentinel-2 satellite evidence")
+
+    weather = source_context.get("weather") or {}
+    weather_provenance = weather.get("provenance") or {}
+    if (
+        weather.get("status") == "SUCCESS"
+        and weather_provenance.get("type") == "REAL_WEATHER_DATA"
+    ):
+        observed.append("real Open-Meteo weather evidence")
+
+    sensor = source_context.get("sensor") or {}
+    if (
+        sensor.get("status") == "PERSISTED_TELEMETRY"
+        and not sensor.get("simulated")
+        and sensor.get("details", {}).get("fresh_reading_count", 0) > 0
+    ):
+        observed.append("fresh persisted IoT telemetry")
+    return observed
+
+
+def _load_persisted_sensor_evidence(region_key, now=None):
+    """Load the newest persisted sensor reading per device for one region."""
+    current_time = now or datetime.now(timezone.utc)
+    records = ObservationStore().list_sensor_telemetry(region_key, limit=500)
+    latest_by_sensor = {}
+    for record in records:
+        sensor_id = record.get("sensor_id")
+        if sensor_id and sensor_id not in latest_by_sensor:
+            latest_by_sensor[sensor_id] = record
+
+    fresh_readings = []
+    stale_readings = []
+    sensor_inputs = {}
+    for record in latest_by_sensor.values():
+        timestamp = record.get("timestamp")
+        try:
+            parsed_timestamp = datetime.fromisoformat(
+                timestamp.replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+            age_seconds = (current_time - parsed_timestamp).total_seconds()
+        except (AttributeError, TypeError, ValueError):
+            age_seconds = float("inf")
+
+        reading = dict(record)
+        reading["current_freshness"] = (
+            "FRESH"
+            if age_seconds <= SENSOR_TELEMETRY_STALE_AFTER_SECONDS
+            else "STALE"
+        )
+        reading["age_seconds"] = age_seconds
+        if reading["current_freshness"] == "STALE":
+            stale_readings.append(reading)
+            continue
+
+        fresh_readings.append(reading)
+        sensor_type = reading.get("sensor_type")
+        value = (reading.get("reading") or {}).get("value")
+        unit = (reading.get("reading") or {}).get("unit")
+        if not isinstance(value, (int, float)):
+            continue
+        if sensor_type == "vibration" and "vibration_cmps" not in sensor_inputs:
+            sensor_inputs["vibration_cmps"] = value
+        elif sensor_type == "water_level" and "water_level_cm" not in sensor_inputs:
+            sensor_inputs["water_level_cm"] = value * 100 if unit == "m" else value
+        elif sensor_type == "rainfall" and "rainfall_mmph" not in sensor_inputs:
+            sensor_inputs["rainfall_mmph"] = {
+                "value": value,
+                "unit": unit,
+                "anomaly_factor": max(0.0, min(1.0, value / 100.0)),
+            }
+
+    all_readings = fresh_readings + stale_readings
+    freshness = (
+        "NONE" if not all_readings
+        else "MIXED" if fresh_readings and stale_readings
+        else "FRESH" if fresh_readings
+        else "STALE"
+    )
+    return {
+        "status": "PERSISTED_TELEMETRY" if fresh_readings else "STALE_TELEMETRY" if stale_readings else "NO_PERSISTED_TELEMETRY",
+        "source": "PERSISTED_SENSOR_TELEMETRY",
+        "sensor_ids": [reading["sensor_id"] for reading in all_readings],
+        "freshness": freshness,
+        "simulated": any(reading.get("simulated") is True for reading in all_readings),
+        "readings": fresh_readings,
+        "stale_readings": stale_readings,
+        "provenance": {
+            "source": "ObservationStore.sensor_telemetry",
+            "accepted_records_only": True,
+            "freshness_checked_at": current_time.isoformat(),
+        },
+        "has_records": bool(all_readings),
+        "usable_for_risk": bool(sensor_inputs),
+        "risk_inputs": sensor_inputs,
+    }
 
 
 def _previous_observation_change(store, region_key, current_area_sqkm):
@@ -586,6 +770,137 @@ def _data_confidence_summary(observation):
     }
 
 
+def _cross_validation_check(
+    name, status, sources, timestamps, provenance_records, explanation
+):
+    return {
+        "name": name,
+        "status": status,
+        "evidence_sources": sources,
+        "timestamps": timestamps,
+        "provenance": provenance_records,
+        "explanation": explanation,
+    }
+
+
+def _build_cross_validation(observation, sensor_evidence, sensor_signal):
+    """Compare available real evidence without creating a risk score."""
+    satellite = observation.get("satellite") or {}
+    satellite_change = observation.get("satellite_change_evidence") or {}
+    weather = observation.get("weather") or {}
+    satellite_change_magnitude = satellite_change.get("change_magnitude") or {}
+    area_status = satellite_change_magnitude.get("water_area_status")
+    area_change = satellite_change_magnitude.get("water_area_deviation_percentage")
+    satellite_time = satellite.get("acquisition_time")
+    satellite_provenance = satellite.get("provenance") or observation.get("provenance")
+
+    checks = {}
+    if weather.get("status") != "SUCCESS":
+        checks["satellite_weather"] = _cross_validation_check(
+            "satellite_weather",
+            "NOT_AVAILABLE",
+            ["Sentinel-2", "Open-Meteo"],
+            {"satellite": satellite_time, "weather": weather.get("observation_time")},
+            {"satellite": satellite_provenance, "weather": weather.get("provenance")},
+            f"Weather evidence is {weather.get('status', 'UNAVAILABLE')}; no comparison was claimed.",
+        )
+    elif area_status not in {
+        "EXPANSION_RELATIVE_TO_SEASONAL_BASELINE",
+        "CONTRACTION_RELATIVE_TO_SEASONAL_BASELINE",
+        "NO_AREA_DEVIATION",
+    }:
+        checks["satellite_weather"] = _cross_validation_check(
+            "satellite_weather",
+            "INSUFFICIENT_EVIDENCE",
+            ["Sentinel-2", "Open-Meteo"],
+            {"satellite": satellite_time, "weather": weather.get("observation_time")},
+            {"satellite": satellite_provenance, "weather": weather.get("provenance")},
+            "Weather is available, but valid satellite change evidence is unavailable.",
+        )
+    else:
+        rainfall = weather.get("rainfall_mmph")
+        if not isinstance(rainfall, (int, float)) or not isinstance(area_change, (int, float)):
+            weather_status = "INSUFFICIENT_EVIDENCE"
+            weather_explanation = "Satellite and weather records lack comparable numeric evidence."
+        elif area_change > 0 and rainfall > 0:
+            weather_status = "CONSISTENT"
+            weather_explanation = "Satellite expansion and observed rainfall are directionally consistent; this is not causal proof."
+        else:
+            weather_status = "INSUFFICIENT_EVIDENCE"
+            weather_explanation = "Satellite and weather evidence do not provide enough basis for an agreement claim."
+        checks["satellite_weather"] = _cross_validation_check(
+            "satellite_weather",
+            weather_status,
+            ["Sentinel-2", "Open-Meteo"],
+            {"satellite": satellite_time, "weather": weather.get("observation_time")},
+            {"satellite": satellite_provenance, "weather": weather.get("provenance")},
+            weather_explanation,
+        )
+
+    fresh_sensor_readings = (sensor_evidence or {}).get("readings") or []
+    if not fresh_sensor_readings:
+        checks["satellite_sensors"] = _cross_validation_check(
+            "satellite_sensors",
+            "NOT_AVAILABLE",
+            ["Sentinel-2", "Persisted sensor telemetry"],
+            {"satellite": satellite_time, "sensors": []},
+            {"satellite": satellite_provenance, "sensors": []},
+            "No fresh persisted sensor telemetry was available for comparison.",
+        )
+    elif area_status not in {
+        "EXPANSION_RELATIVE_TO_SEASONAL_BASELINE",
+        "CONTRACTION_RELATIVE_TO_SEASONAL_BASELINE",
+        "NO_AREA_DEVIATION",
+    }:
+        checks["satellite_sensors"] = _cross_validation_check(
+            "satellite_sensors",
+            "INSUFFICIENT_EVIDENCE",
+            ["Sentinel-2", "Persisted sensor telemetry"],
+            {"satellite": satellite_time, "sensors": [item.get("timestamp") for item in fresh_sensor_readings]},
+            {"satellite": satellite_provenance, "sensors": [item.get("provenance") for item in fresh_sensor_readings]},
+            "Fresh sensor telemetry is available, but valid satellite change evidence is unavailable.",
+        )
+    elif (
+        isinstance(sensor_signal, (int, float))
+        and sensor_signal > 0
+        and isinstance(area_change, (int, float))
+        and area_change > 0
+    ):
+        checks["satellite_sensors"] = _cross_validation_check(
+            "satellite_sensors",
+            "CONSISTENT",
+            ["Sentinel-2", "Persisted sensor telemetry"],
+            {"satellite": satellite_time, "sensors": [item.get("timestamp") for item in fresh_sensor_readings]},
+            {"satellite": satellite_provenance, "sensors": [item.get("provenance") for item in fresh_sensor_readings]},
+            "Satellite expansion and a non-zero fresh sensor signal are directionally consistent; this is not event proof.",
+        )
+    else:
+        checks["satellite_sensors"] = _cross_validation_check(
+            "satellite_sensors",
+            "INSUFFICIENT_EVIDENCE",
+            ["Sentinel-2", "Persisted sensor telemetry"],
+            {"satellite": satellite_time, "sensors": [item.get("timestamp") for item in fresh_sensor_readings]},
+            {"satellite": satellite_provenance, "sensors": [item.get("provenance") for item in fresh_sensor_readings]},
+            "Fresh sensor telemetry and satellite evidence do not support a definitive agreement claim.",
+        )
+
+    statuses = [check["status"] for check in checks.values()]
+    if "CONFLICTING_EVIDENCE" in statuses:
+        overall_status = "CONFLICTING_EVIDENCE"
+    elif "CONSISTENT" in statuses:
+        overall_status = "CONSISTENT"
+    elif any(status == "INSUFFICIENT_EVIDENCE" for status in statuses):
+        overall_status = "INSUFFICIENT_EVIDENCE"
+    else:
+        overall_status = "NOT_AVAILABLE"
+    return {
+        "status": overall_status,
+        "region": observation.get("region"),
+        "checks": checks,
+        "explanation": "Cross-validation compares available evidence only; it does not establish GLOF causation or probability.",
+    }
+
+
 def _public_candidate_detection(candidate_detection):
     """Remove EE server objects before returning candidate evidence as JSON."""
     if not candidate_detection:
@@ -618,6 +933,11 @@ def _run_integrated_monitoring(region_key, start_date=None, end_date=None, mode=
         processed_at=processed_at,
     )
     result["requested_date_range"] = {"start": start_date, "end": end_date}
+    persisted_sensor_evidence = None
+    if mode == "monitoring" and region_key in HIMALAYAN_REGIONS:
+        persisted_sensor_evidence = _load_persisted_sensor_evidence(region_key)
+        if persisted_sensor_evidence["has_records"]:
+            result["sensors"] = persisted_sensor_evidence
     if mode == "monitoring":
         result["weather"] = fetch_weather_observation(
             region["latitude"], region["longitude"]
@@ -707,7 +1027,8 @@ def _run_integrated_monitoring(region_key, start_date=None, end_date=None, mode=
     metadata = pipeline.last_metadata.get("properties", {})
     acquisition_ms = metadata.get("system:time_start")
     acquisition_time = datetime.fromtimestamp(acquisition_ms / 1000, timezone.utc).isoformat() if acquisition_ms else None
-    if not _acquisition_is_in_requested_range(acquisition_ms, start_date, end_date):
+    fallback_used = bool(search_metadata.get("fallback_used"))
+    if not fallback_used and not _acquisition_is_in_requested_range(acquisition_ms, start_date, end_date):
         result["status"] = "STALE_IMAGERY"
         result["reason"] = "Selected imagery is outside the requested observation period"
         result["satellite"] = {
@@ -1150,6 +1471,13 @@ def _run_integrated_monitoring(region_key, start_date=None, end_date=None, mode=
         "status": "SUCCESS",
     }
     result["satellite"] = satellite_observation
+    if fallback_used:
+        satellite_observation["fallback_imagery"] = {
+            "used": True,
+            "search_range": search_metadata.get("final_range"),
+            "actual_acquisition_time": acquisition_time,
+            "note": "Selected from an expanded real Sentinel-2 search window",
+        }
     result["provenance"] = provenance(
         DERIVED_FROM_REAL_DATA,
         source="Google Earth Engine Sentinel-2 SR Harmonized",
@@ -1174,9 +1502,12 @@ def _run_integrated_monitoring(region_key, start_date=None, end_date=None, mode=
         REAL_SATELLITE_DATA,
         source=pipeline.COLLECTION,
         method="Selected GEE image metadata and pixels",
-        limitations=([] if geometry_metadata["status"] in {"VALIDATED", "AUTHORITATIVE"} else [
+        limitations=((
+            ["Image was selected from an expanded real Sentinel-2 search window"]
+            if fallback_used else []
+        ) + ([] if geometry_metadata["status"] in {"VALIDATED", "AUTHORITATIVE"} else [
             "Image pixels are real; target-lake identity is not verified by a bundled lake polygon"
-        ]),
+        ])),
     )
     result["satellite"]["water_area"]["measurement_scope"] = (
         "LAKE_WATER_EXTENT" if geometry_metadata["status"] in {"VALIDATED", "AUTHORITATIVE"} else "DERIVED_CANDIDATE_WATER_EXTENT_IN_APPROXIMATE_ROI"
@@ -1217,6 +1548,7 @@ def _run_integrated_monitoring(region_key, start_date=None, end_date=None, mode=
     engine = RiskEngine()
     sensor_readings = None
     sensor_signal = None
+    sensor_signal_source = None
     if mode == "simulation":
         network = SensorNetwork(region_key)
         network.add_vibration_sensor("VIB-001")
@@ -1236,6 +1568,14 @@ def _run_integrated_monitoring(region_key, start_date=None, end_date=None, mode=
             "water_level_cm": flattened.get("water_level"),
             "rainfall_mmph": rainfall_reading
         })
+    elif mode == "monitoring":
+        if persisted_sensor_evidence["has_records"]:
+            sensor_readings = persisted_sensor_evidence
+            if persisted_sensor_evidence["usable_for_risk"]:
+                sensor_signal = engine.calculate_sensor_signal(
+                    persisted_sensor_evidence["risk_inputs"]
+                )
+                sensor_signal_source = "Persisted sensor telemetry"
 
     ai_result = {
         "status": "NOT_AVAILABLE",
@@ -1283,24 +1623,25 @@ def _run_integrated_monitoring(region_key, start_date=None, end_date=None, mode=
 
     ai_signal = glof_ai_signal_for_risk(ai_result["status"])
 
+    previous_change = _previous_observation_change(
+        ObservationStore(), region_key, current_area_sqkm
+    )
     satellite_signal_inputs = {
         "ndwi_value": ndwi_value or 0,
         "current_area_sqkm": current_area_sqkm or 0,
         "cloud_cover_percent": metadata.get("CLOUDY_PIXEL_PERCENTAGE", 0),
         "data_quality": data_quality
     }
+    if isinstance(previous_change["previous_area_sqkm"], (int, float)):
+        satellite_signal_inputs["previous_area_sqkm"] = previous_change[
+            "previous_area_sqkm"
+        ]
     satellite_signal = engine.calculate_satellite_signal(satellite_signal_inputs)
     weather = result.get("weather") or {}
     weather_signal = weather.get("signal") if weather.get("status") == "SUCCESS" else None
-    if mode == "monitoring" and isinstance(weather_signal, (int, float)):
-        sensor_signal = weather_signal
-        weather["used_for_risk_signal"] = True
-        weather["risk_signal"] = weather_signal
-    elif mode == "monitoring":
+    if mode == "monitoring":
         weather["used_for_risk_signal"] = False
-    previous_change = _previous_observation_change(
-        ObservationStore(), region_key, current_area_sqkm
-    )
+        weather["risk_signal_usage"] = "SEPARATE_WEATHER_SIGNAL"
     seasonal_baseline_mean = (
         ((seasonal_comparison or {}).get("baseline") or {})
         .get("statistics", {})
@@ -1326,10 +1667,14 @@ def _run_integrated_monitoring(region_key, start_date=None, end_date=None, mode=
         "note": "Previous-observation change is separate from the seasonal historical baseline"
     }
     result["sensors"] = sensor_readings or {
-        "status": "NOT_RUN",
-        "note": "Virtual sensors run only in simulation mode",
-        "simulated": True,
+        "status": "UNAVAILABLE",
+        "source": "PERSISTED_SENSOR_TELEMETRY",
+        "note": "No fresh persisted IoT telemetry is available",
+        "simulated": False,
     }
+    result["cross_validation"] = _build_cross_validation(
+        result, persisted_sensor_evidence, sensor_signal
+    )
     result["ai"] = ai_result
     result["decision_support"] = {
         "status": "PROTOTYPE_ASSESSMENT",
@@ -1344,11 +1689,14 @@ def _run_integrated_monitoring(region_key, start_date=None, end_date=None, mode=
         ai_signal,
         sensor_signal,
         region_key,
+        weather_signal=weather_signal,
+        weather_signal_provided=mode == "monitoring",
     )
     result["risk"]["signal_sources"] = {
         "satellite": "Sentinel-2 NDWI and water-area evidence",
         "ai": "Generic YOLO is not a GLOF-domain signal",
-        "sensor": "Open-Meteo rainfall" if weather.get("used_for_risk_signal") else "Unavailable",
+        "sensor": sensor_signal_source or "Unavailable",
+        "weather": weather.get("source") or "Unavailable",
     }
     result["risk_change_explanation"] = _risk_change_explanation(
         ObservationStore(), region_key, result
@@ -1380,12 +1728,22 @@ def run_integrated_monitoring(region_key, start_date=None, end_date=None, mode="
             except ValueError as exc:
                 return {"ok": False, "status": "REGION_INTEGRITY_ERROR", "reason": str(exc)}
         if observation.get("validity_status") == "UNAVAILABLE":
-            return {"ok": False, "status": "UNAVAILABLE", "reason": observation.get("reason", "Observation is unavailable")}
+            return {
+                "ok": False,
+                "status": "UNAVAILABLE",
+                "reason": observation.get("reason", "Observation is unavailable"),
+                "context": {"observation": observation},
+            }
         if observation.get("status") in {
             "ERROR", "NO_SUITABLE_IMAGERY", "STALE_IMAGERY",
             "SATELLITE_PROCESSING_ERROR", "NO_VALID_PIXELS",
         }:
-            return {"ok": False, "status": observation.get("status"), "reason": observation.get("reason", "Imagery acquisition failed")}
+            return {
+                "ok": False,
+                "status": observation.get("status"),
+                "reason": observation.get("reason", "Imagery acquisition failed"),
+                "context": {"observation": observation},
+            }
         return {"ok": True, "status": "VALID", "context": {"observation": observation}}
 
     def quality_masking(context):
@@ -1435,7 +1793,7 @@ def run_integrated_monitoring(region_key, start_date=None, end_date=None, mode="
             return {"ok": False, "status": "INSUFFICIENT_DATA", "reason": "Risk assessment is unavailable"}
         risk = observation["risk"]
         if risk.get("decision_support_status") == "INSUFFICIENT_DATA" or risk.get("assessment_status") in {"INSUFFICIENT_CONFIDENCE", "LIMITED_CONFIDENCE"}:
-            return {"ok": False, "status": "INSUFFICIENT_DATA", "reason": "Risk assessment confidence is insufficient"}
+            return {"ok": True, "status": "INSUFFICIENT_DATA"}
         return {"ok": True, "status": "VALID"}
 
     def early_warning_status(context):
@@ -1480,9 +1838,8 @@ def run_integrated_monitoring(region_key, start_date=None, end_date=None, mode="
                 pass
         if status_result.get("status") == INSUFFICIENT_DATA:
             return {
-                "ok": False,
+                "ok": True,
                 "status": INSUFFICIENT_DATA,
-                "reason": "; ".join(status_result.get("reasons", [])),
                 "context": {
                     "observation": updated_observation,
                     "early_warning_status": status_result,
@@ -1510,7 +1867,17 @@ def run_integrated_monitoring(region_key, start_date=None, end_date=None, mode="
         return observation
     if isinstance(observation, dict):
         observation["execution"] = execution_summary
-        observation["status"] = "ERROR"
+        failure_status = execution.get("failure_status")
+        if execution.get("failed_stage") in {
+            "DATA_QUALITY_MASKING", "OBSERVATION_STORAGE"
+        }:
+            failure_status = "ERROR"
+        elif failure_status not in {
+            "UNAVAILABLE", "INSUFFICIENT_DATA", "NO_SUITABLE_IMAGERY",
+            "STALE_IMAGERY", "SATELLITE_PROCESSING_ERROR", "NO_VALID_PIXELS",
+        }:
+            failure_status = "ERROR"
+        observation["status"] = failure_status
         observation["validity_status"] = "UNAVAILABLE"
         observation["reason"] = execution["failure_reason"]
         observation["decision_support"] = {
@@ -1518,6 +1885,18 @@ def run_integrated_monitoring(region_key, start_date=None, end_date=None, mode="
             "reason": execution["failure_reason"],
             "risk_available": False,
         }
+        if observation.get("observation_id"):
+            try:
+                ObservationStore().update_observation_payload(
+                    observation["observation_id"],
+                    {
+                        "status": observation["status"],
+                        "validity_status": observation["validity_status"],
+                        "reason": observation["reason"],
+                    },
+                )
+            except Exception:
+                pass
         return observation
     result = _integrated_result_skeleton(
         region_key, status="ERROR", mode=mode, reason=execution["failure_reason"]
@@ -1525,6 +1904,10 @@ def run_integrated_monitoring(region_key, start_date=None, end_date=None, mode="
     result["execution"] = execution_summary
     result["status"] = "ERROR"
     result["validity_status"] = "UNAVAILABLE"
+    if mode == "monitoring" and region_key in HIMALAYAN_REGIONS:
+        persisted_sensor_evidence = _load_persisted_sensor_evidence(region_key)
+        if persisted_sensor_evidence["has_records"]:
+            result["sensors"] = persisted_sensor_evidence
     return result
 
 

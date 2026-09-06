@@ -1,464 +1,390 @@
-# G-ALERT Backend - Himalayan Glacial Lake Early Warning Prototype
+# G-ALERT Backend
 
-**Smart India Hackathon (SIH) prototype** | Explainable glacial-lake *risk monitoring* (not operational GLOF prediction)
+G-ALERT is a student hackathon prototype for monitoring Himalayan glacial lakes and exploring possible **Glacial Lake Outburst Flood (GLOF)** risk.
 
----
+It combines real satellite observations, external weather evidence, persisted telemetry, identity validation, evidence status, and prototype decision support. It is an explainable learning system, not an operational warning system or a validated GLOF prediction model.
 
-## Goal
+## What It Does
 
-Show how **real Sentinel-2 observations** (Google Earth Engine), **prototype satellite analysis**, **simulated sensors**, and **supporting signals** can be fused in a **Risk Engine** into an explainable risk level, plus catalog downstream-exposure context and a suggested action.
+The backend monitors configured Himalayan regions using:
 
-**This is a prototype, not an operational GLOF warning or prediction system.**
+- **Sentinel-2 through Google Earth Engine:** real imagery from `COPERNICUS/S2_SR_HARMONIZED`.
+- **NDWI and water-area processing:** SCL quality masking is applied before water detection and area reduction.
+- **Previous-observation comparison:** current observed water area is compared with the newest prior valid observation.
+- **Seasonal baseline evidence:** same-calendar-period historical observations are evaluated separately from previous-observation change.
+- **Open-Meteo weather:** current and recent rainfall are kept as weather evidence.
+- **ESP32/Wokwi telemetry:** accepted telemetry is persisted in SQLite and fresh readings can provide IoT sensor evidence.
+- **Prototype Risk Engine:** combines bounded signals without claiming a validated GLOF probability.
+- **Evidence-only cross-validation:** compares available satellite, weather, and sensor evidence without inventing agreement or causation.
+- **Generic YOLOv8 transparency output:** generic detections are not a GLOF signal and contribute zero to GLOF risk.
 
-**What the current backend actually demonstrates:**
-1. Multi-region glacial lake *monitoring boxes* via Sentinel-2 / GEE
-2. Prototype NDWI / water-area analysis (including optional baseline comparison)
-3. Generic YOLOv8 object detection for transparency only (`NO_DOMAIN_SIGNAL` — **not** a GLOF detector)
-4. Virtual sensor network (Python simulation — **not** live Arduino/Wokwi telemetry)
-5. Prototype risk scoring with explanation, action text, and per-call event history
-6. Scripted Nepal Aug 26, 2026 disaster *simulation* (not a real or forecast event)
+The backend keeps real, simulated, stale, withheld, and unavailable evidence labelled separately.
 
----
+## Monitoring Flow
 
-## Important Disclaimer
-
-**THIS IS A PROTOTYPE / DEMO SYSTEM**
-
-- Sentinel-2 observations come from **Google Earth Engine** (real imagery when authentication succeeds).
-- Satellite analysis is a **prototype NDWI / water-area** method (demo-level processing, not a validated lake inventory or GLOF detector).
-- All sensor readings are **SIMULATED**, not real measurements.
-- The Nepal scenario is a **scripted simulation**, not real historical or forecast data.
-- YOLOv8 (`yolov8n.pt`) is a **generic COCO object detector**. It is **not** trained for glacial lakes or GLOFs. Status `NO_DOMAIN_SIGNAL` means those detections are **not** treated as a valid GLOF-domain AI signal (contribution to GLOF risk is **0.0**).
-- Risk **weights and thresholds** are **prototype/demo logic** in `risk_engine.py`. They are **not scientifically validated**.
-- Downstream exposure text is **reference/context from the region catalog**, not a measured hydrologic model output.
-- Evacuation guidance, if added later, must be labelled **demonstration information** unless validated by authorities.
-- Suggested `action` strings are **not** dispatched alerts (no SMS/WhatsApp/siren in this phase).
-- This system is **NOT** suitable for operational disaster prediction or public warning.
-
----
-
-## 📁 Project Structure
-
-```
-G-ALERT-BACKEND/
-│
-├── satellite/
-│   ├── gee_pipeline.py          # Google Earth Engine connection & Sentinel-2 retrieval
-│   ├── ndwi_analysis.py         # NDWI calculation & water detection
-│   └── region_config.py         # Himalayan monitoring regions configuration
-│
-├── ai/
-│   └── yolov8_detector.py       # YOLOv8 object detection module
-│
-├── simulation/
-│   ├── sensor_simulator.py      # Virtual sensor network (vibration, water level)
-│   └── nepal_disaster.py        # Nepal disaster scenario (Aug 26, 2026 simulation)
-│
-├── risk_engine.py               # Central risk assessment engine
-├── main.py                      # Demo script
-├── requirements.txt             # Python dependencies
-├── .env                         # Configuration (GEE credentials, thresholds)
-└── README.md                    # This file
+```text
+Sentinel-2 / Google Earth Engine
+        |
+        v
+SCL mask -> NDWI -> water area -> previous change / seasonal baseline
+        |
+Open-Meteo weather --------------------+
+Fresh persisted ESP32 telemetry --------+--> evidence and Risk Engine
+Generic YOLOv8 (NO_DOMAIN_SIGNAL) ------+
+        |
+        v
+Risk result, explanation, warning status, provenance, and history
 ```
 
----
+The normal endpoint is:
 
-## 🚀 Quick Start
+```text
+GET /api/monitor/<region_key>
+```
 
-### 1. Install Dependencies
+Normal monitoring uses real data only. Use the explicit simulation endpoints or `mode=simulation` only for demonstrations.
+
+## Evidence Sources and Status
+
+The response keeps these four sources separate:
+
+| Source | Current meaning |
+|---|---|
+| `satellite` | Real Sentinel-2-derived evidence, including NDWI, quality masking, water area, identity context, and change evidence |
+| `weather` | Real Open-Meteo rainfall evidence only |
+| `sensors` / sensor signal | Fresh persisted ESP32/IoT telemetry only |
+| `ai` | Generic YOLO transparency output; currently `NO_DOMAIN_SIGNAL` and zero GLOF contribution |
+
+Evidence can be reported as `AVAILABLE`, `UNAVAILABLE`, `STALE`, `WITHHELD`, `SIMULATED`, `NO_DOMAIN_SIGNAL`, or `INSUFFICIENT_EVIDENCE`, depending on the source and processing path.
+
+### Weather
+
+Open-Meteo is never treated as ESP32 telemetry. Its fields include rainfall values, source, observation time, provenance, and a separate weather signal. Weather may be available even when IoT telemetry is unavailable.
+
+### IoT Sensors
+
+Telemetry is accepted at `POST /api/sensors/telemetry` and persisted in the existing SQLite database. The monitoring workflow selects the newest reading per sensor:
+
+- Fresh telemetry can contribute to the IoT sensor signal.
+- Stale telemetry remains visible as stale evidence but does not contribute to live risk.
+- Missing telemetry remains unavailable; `risk.signals.sensor` can be `null`.
+- Simulated/Wokwi telemetry remains explicitly marked as simulated.
+- Missing evidence is never interpreted as SAFE.
+
+Supported sensor types and units include:
+
+- `vibration`: `cm/s`
+- `water_level`: `cm` or `m`
+- `rainfall`: `mm/h`, `mm/hr`, or `mm/hour`
+
+Example telemetry payload:
+
+```json
+{
+  "sensor_id": "WOKWI-VIB-001",
+  "region_key": "Tsho_Rolpa_Nepal",
+  "sensor_type": "vibration",
+  "timestamp": "2026-09-06T12:00:00Z",
+  "reading": {
+    "value": 4.2,
+    "unit": "cm/s"
+  },
+  "sequence": 1,
+  "simulated": true,
+  "provenance": "Wokwi ESP32 prototype telemetry"
+}
+```
+
+## Satellite Evidence
+
+`Sentinel2Pipeline` retrieves real Sentinel-2 Surface Reflectance imagery through Earth Engine. `NDWIAnalyzer`:
+
+1. Applies Sentinel-2 SCL quality masking.
+2. Excludes cloud shadow, medium/high-probability cloud, thin cirrus, and snow/ice classes.
+3. Calculates NDWI using Sentinel-2 green and NIR bands.
+4. Creates a water mask using the current prototype threshold.
+5. Calculates water area from real Earth Engine pixels.
+
+The default NDWI threshold is a general prototype threshold and is not calibrated for Himalayan glacial lakes. Terrain shadow and turbid water remain limitations.
+
+Two change concepts remain separate:
+
+- **Previous-observation change:** current area versus the newest prior valid observation. This is the comparison used by the satellite signal path when a valid previous area exists.
+- **Seasonal baseline change:** current area versus valid same-calendar-period historical observations. This is contextual evidence and does not replace the previous-observation comparison.
+
+An expanded Sentinel-2 search window, when used, is marked as fallback imagery with the actual acquisition date and provenance.
+
+## Risk Engine
+
+The Risk Engine uses prototype parameters:
+
+- Satellite: `40%`
+- AI: `30%`
+- IoT sensor: `30%`
+
+The current live weather signal is kept separate from the IoT sensor signal. Existing Risk Engine calculations, weights, thresholds, scores, and signal formulas are prototype logic and are not scientifically validated GLOF probabilities.
+
+Risk levels are:
+
+```text
+SAFE       score below 0.30 when required evidence is complete
+WARNING    score from 0.30 to below 0.60
+HIGH_RISK  score from 0.60 to below 0.85
+CRITICAL   score from 0.85 upward
+UNKNOWN    required or withheld evidence prevents a definitive level
+```
+
+A valid monitoring pipeline can complete with:
+
+```text
+overall status: SUCCESS
+risk level: UNKNOWN
+assessment status: LIMITED_CONFIDENCE
+system status: INSUFFICIENT_DATA
+```
+
+This is an explicit insufficient-evidence result, not a system failure and not SAFE. Missing or withheld evidence is never evidence of safety.
+
+### Risk Explanation Fields
+
+Existing `risk.explanation` remains the compatible human-readable string. The additive `risk.explanation_detail` field explains:
+
+- Final risk level, score, confidence, and assessment status.
+- Satellite contribution and relevant satellite details.
+- Open-Meteo weather status and whether it affected the assessment.
+- IoT sensor status, freshness, contribution, or unavailability.
+- AI status and limitations.
+- Evidence that contributed.
+- Evidence that was unavailable, stale, simulated, or withheld.
+- Important prototype limitations.
+
+The AI explanation explicitly states that generic YOLOv8 is not a GLOF-domain model and contributes zero to GLOF risk. `risk.signal_sources` identifies the source behind each signal.
+
+## Execution and Warning Status
+
+Monitoring responses include an `execution` summary with fields such as:
+
+- `execution.job_status`
+- `execution.completed_stages`
+- `execution.failed_stage`
+- `execution.failure_reason`
+- `execution.system_status`
+
+An execution failure indicates an orchestration or processing problem. `INSUFFICIENT_DATA` can instead be a valid evidence outcome after a real observation is processed.
+
+The response also includes:
+
+- `early_warning_status`: system-level `NORMAL`, `WATCH`, `WARNING`, `UNCONFIRMED`, or `INSUFFICIENT_DATA`.
+- `human_warning`: plain-language warning interpretation and recommended action.
+- `alert_confirmation`: confirmation and persistence state for repeated warning observations.
+- `cross_validation`: evidence-only comparison status.
+- `data_confidence`: evidence quality summary, not a probability.
+- `provenance`: source and limitation metadata.
+
+The alert lifecycle stores verified warning events, rejects simulated or unavailable evidence, requires provenance, and prevents duplicate active conditions. It is an internal lifecycle/audit capability only. **Twilio, SMS, WhatsApp, siren, and public alert dispatch are not implemented.**
+
+## Tsho Rolpa
+
+Tsho Rolpa intentionally demonstrates responsible evidence withholding. It may return:
+
+- `IDENTITY_AMBIGUOUS`
+- `IDENTITY_NOT_ESTABLISHED`
+- `INSUFFICIENT_DATA`
+- withheld or unavailable area measurements
+
+This behavior preserves strict candidate identity, trusted-boundary, temporal, and baseline gates. Tsho Rolpa must not be described as SAFE or as an ordinary system error merely because a definitive named-lake assessment was not established.
+
+## AI / ML
+
+The repository includes a generic pretrained `yolov8n.pt` model through Ultralytics. It performs generic object detection for transparency and demo output. It is not trained for GLOF, glacial lakes, moraine dams, or flood prediction.
+
+The integrated live path reports:
+
+```text
+ai.status = NO_DOMAIN_SIGNAL
+ai.signal = 0.0
+risk.signals.ai = 0.0
+```
+
+No domain-specific dataset, custom GLOF weights, or validated GLOF model is included. A future domain model should remain advisory until it has suitable labelled data and scientific validation.
+
+## Real Monitoring and Simulation
+
+Real monitoring uses the normal monitoring endpoint and real external evidence. Simulation remains separate:
+
+- `mode=simulation` uses the existing virtual sensor demonstration path.
+- `GET /api/simulation/nepal-flood` runs the separate scripted Nepal scenario.
+- Simulation evidence is explicitly marked and must not be presented as field observation.
+- Generic YOLO remains zero-contribution in both the real GLOF path and the generic transparency path.
+
+## Project Structure
+
+This is a focused structure summary, not a complete file inventory:
+
+```text
+G-ALERT-backend/
+├── app.py                         # Flask API entrypoint
+├── main.py                        # Integrated monitoring orchestration
+├── risk_engine.py                 # Prototype risk calculation
+├── observation_store.py           # SQLite observations and telemetry
+├── sensor_telemetry.py            # Validation and freshness contracts
+├── weather_integration.py         # Open-Meteo adapter
+├── alert_event_lifecycle.py       # Verified warning lifecycle
+├── audit_trail.py                 # Append-only alert audit records
+├── execution_manager.py           # Monitoring execution stages
+├── satellite/                     # GEE, NDWI, detection, identity, cache
+├── ai/                            # Generic YOLO wrapper
+├── simulation/                    # Virtual sensors and Nepal scenario
+├── wokwi/                         # ESP32/Wokwi sender and diagram
+├── tests/                         # Additional focused tests
+├── gee_cache/                     # Runtime GEE/downstream cache
+├── requirements.txt
+├── README.md
+└── .gitignore
+```
+
+Other root modules and tests support provenance, identity, baselines, cross-validation, downstream context, impact screening, and regression coverage.
+
+## Installation
+
+Use Python 3.11 if possible:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-**Python Version:** 3.11.9 recommended (3.13 may have compatibility issues)
+The requirements include the runtime packages and the declared pytest test dependency. Some satellite, connectivity, and YOLO tests also require network access, Earth Engine authentication, or optional model packages.
 
-### 2. Google Earth Engine Setup
+### Google Earth Engine
 
-#### Option A: Service Account (Recommended for Backend)
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project
-3. Enable Earth Engine API
-4. Create a service account JSON key
-5. Place the JSON file in your project root
-6. Update `.env`:
-   ```
-   GEE_CREDENTIALS_PATH=./gee-credentials.json
-   ```
-
-#### Option B: Interactive Login
-
-Run in Python:
-```python
-import ee
-ee.Initialize()  # Opens browser for authentication
-```
-
-### 3. Run Demo
-
-```bash
-python main.py
-```
-
-This will demonstrate:
-- Virtual sensor network
-- Nepal disaster scenario
-- Risk engine assessment
-- Available monitoring regions
-
----
-
-## 📡 Core Modules
-
-### A. Satellite Pipeline (`satellite/gee_pipeline.py`)
-
-**Purpose:** Connect to Google Earth Engine and retrieve Sentinel-2 imagery
-
-**Key Classes:**
-- `GEEAuthenticator` - Handles GEE authentication
-- `Sentinel2Pipeline` - Retrieves and processes satellite data
-
-**Example:**
-```python
-from satellite.gee_pipeline import initialize_gee_pipeline
-from satellite.region_config import get_region_bounds
-
-# Initialize
-pipeline = initialize_gee_pipeline()
-
-# Get image
-region_bounds = get_region_bounds("Tsho_Rolpa_Nepal")
-image = pipeline.get_sentinel2_image(
-    region_bounds,
-    start_date="2026-01-01",
-    end_date="2026-01-31",
-    cloud_cover_max=20
-)
-```
-
-### B. NDWI Analysis (`satellite/ndwi_analysis.py`)
-
-**Purpose:** Detect and quantify water/lakes using spectral analysis
-
-**Formula:** NDWI = (Green - NIR) / (Green + NIR)
-
-**Pixel-level quality masking (live GEE path):** Before NDWI/water-area computation,
-the pipeline applies Sentinel-2 SCL (Scene Classification Layer) masking, excluding
-cloud shadow (3), medium/high-probability cloud (8/9), thin cirrus (10), and snow/ice
-(11). Masking statistics (per-class fractions, valid-pixel fraction) are measured from
-the actual image and reported in the observation under `satellite.quality_masking`.
-**Limitation:** the NDWI water threshold (0.3, McFeeters 1996) is **not calibrated**
-for Himalayan glacial lakes (`satellite.ndwi_threshold.validated` is always `false`),
-and terrain shadow / turbid water remain known limitations.
-
-**Key Classes:**
-- `NDWIAnalyzer` - Calculates NDWI and water masks
-- `WaterObservation` - Stores water observation data
-
-**Example:**
-```python
-from satellite.ndwi_analysis import NDWIAnalyzer
-
-analyzer = NDWIAnalyzer(ndwi_water_threshold=0.3)
-ndwi = analyzer.calculate_ndwi(image)
-water_mask = analyzer.create_water_mask(ndwi)
-area = analyzer.calculate_water_area(water_mask, region_bounds)
-```
-
-### C. Region Configuration (`satellite/region_config.py`)
-
-**Purpose:** Define and manage Himalayan monitoring regions
-
-**Configured regions** (see `HIMALAYAN_REGIONS` in `satellite/region_config.py`):
-- Nepal: Langtang Valley, Tsho Rolpa, Imja Tsho, Dig Tsho, Thulagi
-- Bhutan: Thorthormi, Raphstreng Tsho
-- Tibet / China: Longbasaba & Pida
-- Karakoram boundary: Shaksgam
-- India: Chorabari Tal (Kedarnath region)
-
-These are documented lakes used as **monitoring sites**, not a complete Himalayan inventory.
-
-### D. YOLOv8 Detector (`ai/yolov8_detector.py`)
-
-**Purpose:** Generic object detection (COCO classes). **Not** a glacial-lake or GLOF detector.
-
-In integrated monitoring, detections may be stored in JSON for transparency, but status is `NO_DOMAIN_SIGNAL` and the AI contribution to GLOF risk is **0.0**.
-
-**Key Classes:**
-- `YOLOv8Detector` - Wrapper around YOLO inference
-- `Detection` - Single detection result
-- `AIObservation` - Collection of detections
-
-**Example:**
-```python
-from ai.yolov8_detector import YOLOv8Detector
-
-detector = YOLOv8Detector(model_name="yolov8n.pt")
-detections = detector.detect_objects("path/to/image.jpg")
-
-for detection in detections:
-    print(f"{detection.class_name}: {detection.confidence:.2f}")
-```
-
-### E. Sensor Simulator (`simulation/sensor_simulator.py`)
-
-**Purpose:** Generate **simulated** sensor readings (vibration, water level, rainfall). Not connected to physical Wokwi/Arduino hardware in this backend.
-
-**Key Classes:**
-- `VibrationSensor` - Simulates seismic/ground vibration
-- `WaterLevelSensor` - Simulates water depth
-- `SensorNetwork` - Network of multiple sensors
-- `SensorObservation` - Point-in-time sensor readings
-
-**Example:**
-```python
-from simulation.sensor_simulator import SensorNetwork
-
-network = SensorNetwork("Nepal_Pokhara")
-network.add_vibration_sensor("VIB-001")
-network.add_water_level_sensor("WATER-001", normal_level=150)
-
-readings = network.read_all_sensors()
-```
-
-### F. Nepal Disaster Simulation (`simulation/nepal_disaster.py`)
-
-**Purpose:** Scripted Nepal Aug 26, 2026 flash-flood *simulation* for demos. All sensor/satellite/AI values in the scenario are generated. This is not a real event.
-
-**Phases:**
-1. **NORMAL** - Baseline conditions
-2. **ALERT** - Vibration anomaly detected
-3. **HIGH_ALERT** - Increasing vibration + water rise
-4. **CRITICAL** - Rapid changes, high risk
-5. **INCIDENT** - Peak disaster (GLOF/flood)
-
-**Example:**
-```python
-from simulation.nepal_disaster import NepalDisasterScenario
-
-scenario = NepalDisasterScenario()
-
-for i in range(5):
-    event = scenario.get_next_event()
-    print(f"Phase: {event['phase'].value}")
-    print(f"Risk Level: {event['risk_level']}")
-```
-
-### G. Risk Engine (`risk_engine.py`)
-
-**Purpose:** Combine satellite, AI, and sensor **signals** (0–1) into a prototype risk level.
-
-**Risk Levels (prototype cutoffs in code, not validated science):**
-- `SAFE` (score 0.0 - 0.3)
-- `WARNING` (score 0.3 - 0.6)
-- `HIGH_RISK` (score 0.6 - 0.85)
-- `CRITICAL` (score 0.85 - 1.0)
-
-**Signal weights (prototype, currently 40% / 30% / 30%):**
-- Satellite: 40%
-- AI: 30% (generic YOLO is forced to 0.0 in the integrated GEE path)
-- Sensor: 30%
-
-`action` and `explanation` live **inside** the `risk` object. Per-call `history` is the RiskEngine instance list (often length 1).
-
-**Example:**
-```python
-from risk_engine import RiskEngine
-
-engine = RiskEngine()
-
-assessment = engine.assess_risk(
-    satellite_signal=0.7,
-    ai_signal=0.5,
-    sensor_signal=0.6
-)
-
-print(assessment['risk_level'])      # HIGH_RISK
-print(assessment['explanation'])     # Human-readable explanation
-```
-
----
-
-## Integrated JSON (Streamlit contract)
-
-Both live monitoring and the Nepal simulation return the same **top-level keys**:
-
-`status`, `region`, `satellite`, `satellite_change`, `sensors`, `ai`, `risk`, `downstream_exposure`, `history`
-
-- **Frontend must not calculate** risk score, risk level, weights, or thresholds. Display `risk` from the backend Risk Engine only.
-- Warning/action are **inside** `risk` (`action`, `explanation`).
-- **Simulation phase** (NORMAL → INCIDENT) is the scripted story (`simulation_phase`). **`risk.risk_level`** is the engine assessment. They are not required to match.
-
-### A. Pan-Himalayan monitoring (real Sentinel-2 / GEE)
-
-```python
-from main import run_integrated_monitoring
-
-observation = run_integrated_monitoring("Tsho_Rolpa_Nepal")  # mode defaults to "monitoring"
-```
-
-- Uses Google Earth Engine. If GEE fails, returns an honest error envelope (`status=ERROR` or `NO_SUITABLE_IMAGERY`). Does **not** invent satellite imagery.
-- Sensors stay `NOT_RUN` in monitoring mode (no silent simulated telemetry).
-- Generic YOLO, if present, is `NO_DOMAIN_SIGNAL` with GLOF AI contribution **0.0**.
-
-### B. Nepal simulation (no GEE)
-
-```python
-from main import NepalDisasterScenario, run_nepal_simulation_step, run_nepal_simulation_sequence
-
-# Full five-phase run, one shared RiskEngine (history length 5):
-steps = run_nepal_simulation_sequence()
-
-# Or step through for the UI:
-scenario = NepalDisasterScenario()
-step = run_nepal_simulation_step(scenario)  # repeat; returns None when finished
-```
-
-- `mode` is `nepal_simulation`. Does **not** call GEE; works if Earth Engine is unavailable.
-- Sensors, simulated NDWI/area, and simulated AI anomaly are labelled `simulated: true`.
-- Nepal AI is a **scripted supporting signal**, not YOLOv8.
-
----
-
-## 🔧 Configuration
-
-GEE credentials are read from `.env` (`GEE_CREDENTIALS_PATH`, `GEE_PROJECT_ID` / `GOOGLE_CLOUD_PROJECT`).
-
-**Risk weights and thresholds are defined in `risk_engine.py`**, not currently loaded from `.env`. Do not treat `.env` `RISK_*` examples as live engine settings unless that wiring is added later.
-
-Satellite cloud/NDWI demo defaults live in the GEE pipeline and `NDWIAnalyzer` (NDWI water threshold default 0.3).
-
-Example `.env` for Earth Engine:
+The live satellite path requires Earth Engine authentication. For a service account, configure local environment variables such as:
 
 ```ini
 GEE_CREDENTIALS_PATH=./gee-credentials.json
 GEE_PROJECT_ID=your-gcp-project
 ```
 
----
+Interactive Earth Engine authentication is also supported. Credential files are local secrets and must not be committed.
 
-## 📊 Data Flow (prototype)
+## Running the Backend
 
-```
-Sentinel-2 (GEE, monitoring) → NDWI / water-area / baseline (prototype)
-        → satellite signal (0-1)
-Monitoring sensors: NOT_RUN unless an explicit simulation mode is requested
-Generic YOLOv8 (monitoring) → NO_DOMAIN_SIGNAL → AI GLOF signal = 0.0
-Nepal simulation: scripted sensors + simulated NDWI/AI (labelled simulated)
-        → Risk Engine (single source of risk_level)
-        → explanation + action
-        → downstream_exposure (catalog text, when present)
-        → history (one engine instance per Nepal run)
-```
+### Flask API
 
-There is no Flask HTTP API. Streamlit should import `run_integrated_monitoring` and `run_nepal_simulation_step` / `run_nepal_simulation_sequence`.
+From the repository root:
 
----
-
-## Dependency inventory (do not uninstall yet)
-
-Recorded for a later decision with the Streamlit / teammate stack. **Nothing was removed in Phase 1.**
-
-| Dependency | In `requirements.txt` | Used by current backend code? |
-|---|---|---|
-| earthengine-api | yes | Yes — `satellite/gee_pipeline.py`, NDWI GEE path, GEE tests |
-| python-dotenv | yes | Yes — GEE pipeline and GEE tests |
-| numpy | yes | Yes — `satellite/ndwi_analysis.py` (numeric/demo branch) |
-| ultralytics, torch, torchvision | yes | Yes — `ai/yolov8_detector.py` (optional; integrated path degrades if missing) |
-| requests | yes | Not imported in app modules (may be used transitively) |
-| python-dateutil | yes | Not imported in app modules |
-| Flask | yes | **Not used** (no Flask app) |
-| PyArduino | yes | **Not imported**; package name is questionable on PyPI |
-| pandas, rasterio, geopandas | yes | **Not imported** in current backend modules |
-| numpy/pandas GIS stack | — | GEE analysis uses Earth Engine reducers, not rasterio locally |
-
----
-
-## 🧪 Testing
-
-### Test 1: Sensor Network
 ```bash
-python -c "from simulation.sensor_simulator import SensorNetwork; net = SensorNetwork('test'); net.add_vibration_sensor('V1'); net.add_water_level_sensor('W1'); print(net.read_all_sensors())"
+python app.py
 ```
 
-### Test 2: Nepal Scenario
-```bash
-python -c "from simulation.nepal_disaster import NepalDisasterScenario; s = NepalDisasterScenario(); [print(e['phase'].value) for e in s.event_sequence[:3]]"
-```
+The API listens on port `5000`.
 
-### Test 3: Risk Engine
-```bash
-python -c "from risk_engine import RiskEngine; e = RiskEngine(); print(e.assess_risk(0.5, 0.6, 0.7)['risk_level'])"
-```
+### Python Demo
 
-### Test 5: Phase 1 integrated contract (no live GEE)
-```bash
-python phase1_integrated_test.py
-```
-
-### Test 6: Phase 2 Nepal integration (no live GEE)
-```bash
-python phase2_nepal_test.py
-```
-
-### Test 7: Full Demo
 ```bash
 python main.py
 ```
-Live GEE, YOLO, and torch are environment-dependent.
 
----
+The demo includes virtual sensors, the scripted Nepal scenario, prototype risk examples, and configured regions. Simulation output is labeled as simulation.
 
-## Next steps (later phases)
+### Wokwi ESP32 Prototype
 
-- Alert provider interface (no SMS until a teammate chooses a provider)
-- Streamlit UI consuming the JSON keys above
+Open `wokwi/diagram.json` in Wokwi or the Wokwi VS Code extension. The sketch:
 
-Do not treat Risk Engine weight/threshold retuning as a default next step.
+- Connects to `Wokwi-GUEST` WiFi.
+- Uses NTP for UTC timestamps.
+- Sends vibration, water-level, and rainfall payloads every 30 seconds.
+- Marks readings as simulated Wokwi prototype telemetry.
+- Sends to the backend URL configured in `wokwi/sketch.ino`.
 
----
+A cloud Wokwi simulation may need Gateway host access or a tunnel to reach Flask on a local computer.
 
-## Notes for hackathon judges
+## API Endpoints
 
-**Honest demonstration:**
+### System and Regions
 
-1. **Real satellite data** — Sentinel-2 via Google Earth Engine (when auth works)
-2. **Prototype NDWI / water-area** — not a validated GLOF predictor
-3. **Generic YOLOv8** — COCO detections may appear; they do **not** raise GLOF risk (`NO_DOMAIN_SIGNAL`)
-4. **Virtual sensors** — simulated Python readings, not live field instruments
-5. **Nepal scenario** — scripted simulation to show escalation
-6. **Risk Engine** — prototype weighted score, explanation, and action text
-7. **Downstream exposure** — catalog/reference context, not a flood model
+```text
+GET  /api/health
+GET  /api/regions
+GET  /api/regions/<region_key>
+```
 
-**Do not claim:** operational early warning, real-time GLOF prediction, or YOLO-based glacial-lake detection.
+### Monitoring
 
----
+```text
+GET  /api/monitor/<region_key>
+POST /api/monitor/multi
+GET  /api/monitor/<region_key>/temporal
+GET  /api/monitor/Tsho_Rolpa_Nepal/temporal
+POST /api/monitor/multi/temporal
+```
 
-## 📚 References
+### Sensor Telemetry
 
-- [Google Earth Engine Documentation](https://developers.google.com/earth-engine)
-- [Sentinel-2 Bands](https://sentinel.esa.int/web/sentinel/user-guides/sentinel-2-msi/resolutions/spatial)
-- [NDWI Research](https://en.wikipedia.org/wiki/Normalized_difference_water_index)
-- [YOLOv8 Docs](https://docs.ultralytics.com/)
-- [GLOF Information](https://en.wikipedia.org/wiki/Glacial_lake_outburst_flood)
+```text
+POST /api/sensors/telemetry
+GET  /api/sensors/status/<region_key>
+GET  /api/sensors/telemetry/<sensor_id>/latest
+GET  /api/sensors/telemetry/<region_key>/history
+POST /api/sensors/simulate
+```
 
----
+### Other Demos and History
 
-## 👥 Development Team
+```text
+GET  /api/observations/<region_key>
+GET  /api/observations/<region_key>/temporal
+POST /api/demo/risk-engine
+GET  /api/simulation/nepal-flood
+```
 
-**Backend Developer:** [Your Name]  
-**Frontend Developer:** [Team Member Name]
+## Testing
 
-**Hackathon Project:** G-ALERT  
-**Date:** 2026
+Focused telemetry and evidence tests can be run directly:
 
----
+```bash
+python sensor_telemetry_test.py
+python sensor_telemetry_api_test.py
+python sensor_telemetry_persistence_test.py
+python sensor_monitoring_integration_test.py
+python monitoring_evidence_validation_test.py
+```
 
-## ⚖️ License & Attribution
+Core prototype checks:
 
-This is a hackathon prototype created for educational and demonstration purposes.
+```bash
+python risk_engine_test.py
+python phase1_integrated_test.py
+python phase2_nepal_test.py
+python backend_quality_test.py
+python production_execution_integration_test.py
+```
 
----
+The pytest suite can be run after installing the declared dependencies:
 
-**Last Updated:** September 3, 2026 (Phase 1 documentation)
+```bash
+python -m pytest -q
+```
+
+Some satellite and connectivity tests require Earth Engine authentication, network access, or optional ML packages. Use isolated temporary databases for tests that exercise persistence so stale live telemetry does not affect results.
+
+## Current Limitations
+
+- This is a hackathon prototype, not an operational GLOF warning system.
+- Risk weights, thresholds, and signals are not scientifically validated GLOF probabilities.
+- Missing or withheld evidence is not evidence of safety.
+- IoT availability may be limited; missing telemetry remains unavailable rather than being replaced with fake data.
+- Wokwi and Python sensor readings are simulated, not field measurements.
+- No physical Arduino or ESP32 hardware is connected to the backend yet.
+- The NDWI threshold is not calibrated for Himalayan glacial lakes.
+- Configured regions use approximate monitoring geometry unless trusted reference geometry is available.
+- Named-lake identity can remain `IDENTITY_AMBIGUOUS` when temporal persistence or trusted reference evidence is missing.
+- Seasonal comparison can be `INSUFFICIENT_HISTORICAL_DATA` when too few valid same-period real acquisitions are available.
+- Cross-validation reports insufficient or unavailable evidence rather than forcing agreement.
+- Generic YOLOv8 is not a GLOF or glacial-lake detector and contributes zero domain-specific AI risk.
+- Downstream impact mapping is approximate screening, not hydrodynamic flood simulation.
+- Weather, Earth Engine, Wokwi networking, and external data providers depend on network access and authentication.
+- Twilio, SMS, WhatsApp, siren, and public alert dispatch are not implemented.
+
+## Project Note
+
+G-ALERT is built to make a complicated disaster-monitoring idea easier to explore: combine multiple signals, keep provenance visible, show uncertainty honestly, and let students extend the system step by step.

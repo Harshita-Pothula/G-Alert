@@ -3,6 +3,8 @@
 Does not call Google Earth Engine or load YOLOv8 weights.
 """
 
+import os
+import tempfile
 from unittest.mock import patch
 
 from main import (
@@ -102,6 +104,13 @@ def test_nepal_simulated_flags(steps):
             raise AssertionError("simulated satellite values must be labelled")
         if "yolo" in str(ai.get("detector_type", "")).lower():
             raise AssertionError("Nepal AI must not be YOLO")
+        explanation_sources = (step["risk"].get("explanation_detail") or {}).get("sources", {})
+        if explanation_sources.get("satellite", {}).get("status") != "SIMULATED":
+            raise AssertionError("simulation satellite explanation must be SIMULATED")
+        if explanation_sources.get("sensor", {}).get("status") != "SIMULATED":
+            raise AssertionError("simulation sensor explanation must be SIMULATED")
+        if explanation_sources.get("ai", {}).get("status") != "SIMULATED":
+            raise AssertionError("simulation AI explanation must be SIMULATED")
     print("   PASS")
 
 
@@ -116,12 +125,16 @@ def test_live_yolo_still_zero():
 
 def test_monitoring_does_not_invent_sensors():
     print("H. Monitoring mode does not invent sensor telemetry")
-    error = run_integrated_monitoring("not_a_real_region")
-    if error["sensors"].get("status") != "NOT_RUN":
-        raise AssertionError("unknown region should not invent sensors")
+    with tempfile.TemporaryDirectory() as directory, patch.dict(
+        os.environ,
+        {"G_ALERT_OBSERVATIONS_DB": f"{directory}/observations.sqlite3"},
+    ):
+        error = run_integrated_monitoring("not_a_real_region")
+        if error["sensors"].get("status") != "NOT_RUN":
+            raise AssertionError("unknown region should not invent sensors")
 
-    with patch("main.initialize_gee_pipeline", return_value=None):
-        result = run_integrated_monitoring("Tsho_Rolpa_Nepal")
+        with patch("main.initialize_gee_pipeline", return_value=None):
+            result = run_integrated_monitoring("Tsho_Rolpa_Nepal")
     if result["status"] != "ERROR":
         raise AssertionError(f"GEE failure should be ERROR, got {result['status']}")
     if result["sensors"].get("status") != "NOT_RUN":

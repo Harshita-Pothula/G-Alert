@@ -22,8 +22,11 @@ IMPORTANT DISCLAIMER:
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
+
+
+_WEATHER_NOT_PROVIDED = object()
 
 
 class RiskLevel(Enum):
@@ -87,6 +90,7 @@ class RiskEngine:
         sensor_signal=None,
         region=None,
         evidence=None,
+        weather_signal=_WEATHER_NOT_PROVIDED,
     ):
         """
         Assess overall risk from available signals.
@@ -115,6 +119,10 @@ class RiskEngine:
                 ("sensor", sensor_signal),
             ) if value is None
         ]
+        sensor_was_missing = sensor_signal is None
+        weather_provided = weather_signal is not _WEATHER_NOT_PROVIDED
+        if weather_provided and weather_signal is None:
+            missing_inputs.append("weather")
 
         observed_evidence = evidence.get("observed_evidence", [])
         supplied_derived_indicators = evidence.get("derived_indicators", [])
@@ -142,6 +150,9 @@ class RiskEngine:
         satellite_signal = satellite_signal or 0.0
         ai_signal = ai_signal or 0.0
         sensor_signal = sensor_signal or 0.0
+        numeric_weather_signal = (
+            weather_signal if weather_provided and weather_signal is not None else 0.0
+        )
         
         # Clamp to 0-1 range
         satellite_signal = max(0, min(1, satellite_signal))
@@ -221,7 +232,8 @@ class RiskEngine:
             for name, value in (
                 ("satellite_signal", satellite_signal),
                 ("ai_signal", ai_signal),
-                ("sensor_signal", sensor_signal),
+                ("sensor_signal", None if sensor_was_missing else sensor_signal),
+                ("weather_signal", weather_signal if weather_provided else None),
             )
         ])
         derived_indicators.append({
@@ -231,7 +243,7 @@ class RiskEngine:
         })
 
         assessment = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "risk_score": round(risk_score, 4),
             "risk_level": risk_level.value if isinstance(risk_level, RiskLevel) else risk_level,
             "action": action,
@@ -239,7 +251,14 @@ class RiskEngine:
             "signals": {
                 "satellite": round(satellite_signal, 4),
                 "ai": round(ai_signal, 4),
-                "sensor": round(sensor_signal, 4)
+                "sensor": None if sensor_was_missing else round(sensor_signal, 4),
+                "weather": (
+                    None
+                    if weather_provided and weather_signal is None
+                    else round(numeric_weather_signal, 4)
+                    if weather_provided
+                    else None
+                ),
             },
             "weights": self.weights,
             "thresholds": self.thresholds,
@@ -260,6 +279,10 @@ class RiskEngine:
             ),
             "meta_flag": ASSESSMENT_META_FLAG,
         }
+        assessment["explanation_detail"] = self._build_explanation_detail(
+            assessment,
+            evidence.get("explanation_sources") or {},
+        )
 
         history_entry = {
             "timestamp": assessment["timestamp"],
@@ -278,6 +301,110 @@ class RiskEngine:
         
         self.last_assessment = assessment
         return assessment
+
+    def _build_explanation_detail(self, assessment, source_context):
+        """Build additive, source-specific explanation metadata without recalculation."""
+        source_context = source_context if isinstance(source_context, dict) else {}
+        sources = {}
+        evidence_contributed = []
+        evidence_unavailable = list(assessment.get("unavailable_information") or [])
+
+        for name in ("satellite", "weather", "sensor", "ai"):
+            context = source_context.get(name) or {}
+            raw_status = context.get("status")
+            if context.get("simulated") is True or raw_status in {
+                "SIMULATED", "simulated", "SIMULATED_SUPPORTING_SIGNAL",
+            }:
+                status = "SIMULATED"
+            elif raw_status in {"STALE", "STALE_TELEMETRY"}:
+                status = "STALE"
+            elif raw_status in {
+                "IDENTITY_AMBIGUOUS", "IDENTITY_UNCERTAIN",
+                "IDENTITY_NOT_ESTABLISHED", "WITHHELD",
+            }:
+                status = "WITHHELD"
+            elif raw_status in {
+                "UNAVAILABLE", "NOT_AVAILABLE", "NOT_RUN",
+                "NO_PERSISTED_TELEMETRY",
+            }:
+                status = "UNAVAILABLE"
+            elif raw_status == "NO_DOMAIN_SIGNAL":
+                status = "NO_DOMAIN_SIGNAL"
+            elif raw_status or assessment.get("signals", {}).get(name) is not None:
+                status = "AVAILABLE"
+            else:
+                status = "UNAVAILABLE"
+
+            signal = assessment.get("signals", {}).get(name)
+            contributed = (
+                status == "AVAILABLE"
+                and isinstance(signal, (int, float))
+                and signal > 0
+            )
+            if name == "weather":
+                contributed = False
+            if contributed:
+                evidence_contributed.append(
+                    f"{name.capitalize()} evidence contributed signal {signal:.4f}."
+                )
+            elif status in {"UNAVAILABLE", "STALE", "WITHHELD", "SIMULATED"}:
+                evidence_unavailable.append(
+                    f"{name.capitalize()} evidence is {status.lower()} and did not contribute."
+                )
+
+            summary = context.get("summary")
+            if not summary:
+                if name == "ai":
+                    summary = (
+                        "Generic YOLOv8 is not a GLOF-domain model and contributes zero to GLOF risk."
+                    )
+                elif status == "WITHHELD":
+                    summary = "Evidence was withheld because required identity or validity checks were not satisfied."
+                elif status == "STALE":
+                    summary = "Evidence was stale and was excluded from the assessment."
+                elif status == "UNAVAILABLE":
+                    summary = "No usable evidence was available for this source."
+                elif status == "SIMULATED":
+                    summary = "This source contains simulated evidence and is not a live observation."
+                elif contributed:
+                    summary = f"This source contributed signal {signal:.4f} to the assessment."
+                else:
+                    summary = "Evidence was available but did not produce a positive contribution."
+
+            sources[name] = {
+                "status": status,
+                "signal": signal,
+                "contributed": contributed,
+                "summary": summary,
+                "details": context.get("details", {}),
+                "provenance": context.get("provenance"),
+            }
+
+        risk_level = assessment.get("risk_level")
+        if risk_level == "UNKNOWN" or assessment.get("missing_inputs") or evidence_unavailable:
+            summary = "A definitive risk level cannot be established because required evidence is unavailable or withheld."
+        elif risk_level == "SAFE":
+            summary = "No elevated risk was established from currently available evidence."
+        else:
+            summary = "Elevated prototype risk was established from available evidence."
+
+        limitations = list(assessment.get("assumptions") or [])
+        limitations.append("The score is not a validated GLOF probability.")
+        limitations.append("Missing or withheld evidence is not evidence of safety.")
+        return {
+            "summary": summary,
+            "decision": {
+                "risk_level": risk_level,
+                "risk_score": assessment.get("risk_score"),
+                "confidence": assessment.get("confidence"),
+                "assessment_status": assessment.get("assessment_status"),
+                "decision_support_status": assessment.get("decision_support_status"),
+            },
+            "evidence_contributed": evidence_contributed,
+            "evidence_unavailable": list(dict.fromkeys(evidence_unavailable)),
+            "sources": sources,
+            "limitations": list(dict.fromkeys(limitations)),
+        }
     
     def _generate_explanation(self, sat, ai, sensor, score):
         """Generate human-readable explanation of risk level."""
