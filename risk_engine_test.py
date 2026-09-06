@@ -26,6 +26,14 @@ print("-" * 30)
 print("Test result:", "PASS" if passed else "FAIL")
 
 print("\nSatellite data-quality tests")
+positive_area_increase = engine.calculate_satellite_signal({
+    "current_area_sqkm": 15.0,
+    "previous_area_sqkm": 10.0,
+    "data_quality": {"confidence": 1.0},
+})
+if positive_area_increase <= 0:
+    raise SystemExit("Positive real area increase must produce a positive satellite signal")
+
 good_quality = engine.calculate_satellite_signal({
     "current_area_sqkm": 15.0,
     "previous_area_sqkm": 10.0,

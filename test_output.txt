@@ -1,0 +1,8 @@
+G-ALERT NDWI test
+This is a test only. No production files are modified.
+Initializing Earth Engine with project: g-alert-507210
+Collection count: 1
+Selected image ID: 20260824T050231_20260824T050638_T45RVM
+NDWI calculation status: success
+Mean NDWI over test region: -0.39816672746260023
+Estimated water area: 0.0 sq m

@@ -7,7 +7,7 @@ Handles connection to GEE and satellite imagery processing.
 
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 # Import Earth Engine
@@ -47,9 +47,14 @@ class GEEAuthenticator:
             project_id = os.getenv("GEE_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
             if self.credentials_path and os.path.exists(self.credentials_path):
                 # Service account authentication
+                with open(self.credentials_path, "r", encoding="utf-8") as credentials_file:
+                    credentials_data = json.load(credentials_file)
+                service_account_email = credentials_data.get("client_email")
+                if not service_account_email:
+                    raise ValueError("GEE service-account JSON has no client_email")
                 ee.Initialize(
                     ee.ServiceAccountCredentials(
-                        email=None,
+                        email=service_account_email,
                         key_file=self.credentials_path
                     ),
                     project=project_id
@@ -158,6 +163,224 @@ class Sentinel2Pipeline:
             
         except Exception as e:
             print(f"✗ Error retrieving Sentinel-2 image: {e}")
+            return None
+
+    def get_sentinel2_image_with_fallback(self, region_geometry, start_date, end_date, 
+                                         cloud_cover_max=20, max_window_days=90,
+                                         coverage_geometry=None):
+        """
+        Retrieve Sentinel-2 image with sliding window fallback for robust live demos.
+        
+        Strategy:
+        1. Try exact date range first
+        2. If no images, expand window by +7 days incrementally
+        3. Continue expanding until max_window_days or image found
+        4. Also try relaxing cloud cover requirements
+        
+        Args:
+            region_geometry: GeoJSON polygon for region of interest
+            start_date: Start date (string "YYYY-MM-DD" or datetime)
+            end_date: End date (string "YYYY-MM-DD" or datetime)
+            cloud_cover_max: Maximum cloud cover percentage (default 20%)
+            max_window_days: Maximum days to expand search window
+            coverage_geometry: optional GeoJSON polygon (e.g. the lake analysis
+                box) that the selected image must actually cover with pixels.
+                Sentinel-2 tiles are ~100 km strips; filterBounds(region_geometry)
+                can match a tile that intersects the large search region but
+                misses the small lake analysis box, which yields empty pixels
+                and NDWI=null / water area 0. When provided, only images with
+                actual pixels over this geometry are selected.
+            
+        Returns:
+            tuple: (ee.Image object or None, search_metadata dict)
+        """
+        
+        # Convert strings to datetime if needed
+        if isinstance(start_date, str):
+            start_date = datetime.strptime(start_date, "%Y-%m-%d")
+        if isinstance(end_date, str):
+            end_date = datetime.strptime(end_date, "%Y-%m-%d")
+        
+        search_metadata = {
+            "original_range": f"{start_date.date()} to {end_date.date()}",
+            "attempts": [],
+            "final_range": None,
+            "cloud_cover_relaxed": False,
+            "fallback_used": False,
+            "coverage_geometry_verified": coverage_geometry is not None,
+            "selected_image": None,
+        }
+
+        def record_selected_image():
+            properties = (self.last_metadata or {}).get("properties", {})
+            acquisition_ms = properties.get("system:time_start")
+            acquisition_time = (
+                datetime.fromtimestamp(acquisition_ms / 1000, timezone.utc).isoformat()
+                if acquisition_ms
+                else None
+            )
+            search_metadata["selected_image"] = {
+                "image_id": properties.get("system:index"),
+                "acquisition_time": acquisition_time,
+            }
+        
+        # Strategy 1: Try exact range with strict cloud cover
+        print(f"→ Attempt 1: Exact range {start_date.date()} to {end_date.date()}, cloud ≤ {cloud_cover_max}%")
+        image = self._try_date_range(region_geometry, start_date, end_date, cloud_cover_max,
+                                     coverage_geometry=coverage_geometry)
+        search_metadata["attempts"].append({
+            "attempt": 1,
+            "range": f"{start_date.date()} to {end_date.date()}",
+            "cloud_cover": cloud_cover_max,
+            "result": "success" if image else "no_images"
+        })
+        
+        if image:
+            search_metadata["final_range"] = search_metadata["original_range"]
+            record_selected_image()
+            return image, search_metadata
+        
+        # Strategy 2: Sliding window expansion
+        window_increment = 7  # days
+        current_window = window_increment
+        
+        while current_window <= max_window_days:
+            expanded_start = start_date - timedelta(days=current_window)
+            expanded_end = end_date + timedelta(days=current_window)
+            
+            attempt_num = len(search_metadata["attempts"]) + 1
+            print(f"→ Attempt {attempt_num}: Expanded range ±{current_window} days ({expanded_start.date()} to {expanded_end.date()})")
+            
+            image = self._try_date_range(region_geometry, expanded_start, expanded_end, cloud_cover_max,
+                                         coverage_geometry=coverage_geometry)
+            search_metadata["attempts"].append({
+                "attempt": attempt_num,
+                "range": f"{expanded_start.date()} to {expanded_end.date()}",
+                "cloud_cover": cloud_cover_max,
+                "window_expansion_days": current_window,
+                "result": "success" if image else "no_images"
+            })
+            
+            if image:
+                search_metadata["final_range"] = f"{expanded_start.date()} to {expanded_end.date()}"
+                search_metadata["fallback_used"] = True
+                record_selected_image()
+                return image, search_metadata
+            
+            current_window += window_increment
+        
+        # Strategy 3: Relax cloud cover requirements
+        relaxed_cloud_limits = [30, 40, 50, 60]
+        for cloud_limit in relaxed_cloud_limits:
+            attempt_num = len(search_metadata["attempts"]) + 1
+            max_end = end_date + timedelta(days=max_window_days)
+            max_start = start_date - timedelta(days=max_window_days)
+            
+            print(f"→ Attempt {attempt_num}: Relaxed cloud cover to {cloud_limit}%")
+            
+            image = self._try_date_range(region_geometry, max_start, max_end, cloud_limit,
+                                         coverage_geometry=coverage_geometry)
+            search_metadata["attempts"].append({
+                "attempt": attempt_num,
+                "range": f"{max_start.date()} to {max_end.date()}",
+                "cloud_cover": cloud_limit,
+                "cloud_cover_relaxed": True,
+                "result": "success" if image else "no_images"
+            })
+            
+            if image:
+                search_metadata["final_range"] = f"{max_start.date()} to {max_end.date()}"
+                search_metadata["cloud_cover_relaxed"] = True
+                search_metadata["fallback_used"] = True
+                record_selected_image()
+                return image, search_metadata
+        
+        # All strategies failed
+        print(f"✗ No suitable imagery found after {len(search_metadata['attempts'])} attempts")
+        if coverage_geometry is not None:
+            print("  (Coverage over the analysis geometry was verified for every attempt)")
+        return None, search_metadata
+
+    def _analysis_pixel_count(self, image, coverage_geometry):
+        """
+        Server-side count of image pixels over the coverage geometry.
+
+        Uses the green band (B3): a count of 0 (or None) means the image has
+        no pixels over the geometry, i.e. it does NOT cover the analysis area.
+        """
+        return image.select("B3").reduceRegion(
+            reducer=ee.Reducer.count(),
+            geometry=ee.Geometry(coverage_geometry),
+            scale=30,
+            maxPixels=10_000_000,
+            bestEffort=True,
+        ).get("B3")
+
+    def filter_collection_covering(self, collection, coverage_geometry):
+        """
+        Restrict an image collection to images that actually cover the
+        coverage geometry with at least one pixel.
+
+        Args:
+            collection: ee.ImageCollection (already filtered by bounds/date/cloud)
+            coverage_geometry: GeoJSON polygon the images must cover
+
+        Returns:
+            ee.ImageCollection containing only covering images
+        """
+
+        def _set_pixel_count(image):
+            return image.set(
+                "analysis_pixel_count", self._analysis_pixel_count(image, coverage_geometry)
+            )
+
+        return collection.map(_set_pixel_count).filter(
+            ee.Filter.gt("analysis_pixel_count", 0)
+        )
+
+    def _try_date_range(self, region_geometry, start_date, end_date, cloud_cover_max,
+                        coverage_geometry=None):
+        """Helper method to try a specific date range."""
+        try:
+            ee_geometry = ee.Geometry(region_geometry)
+            
+            collection = (
+                ee.ImageCollection(self.COLLECTION)
+                .filterBounds(ee_geometry)
+                .filterDate(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+                .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", cloud_cover_max))
+                .sort("CLOUDY_PIXEL_PERCENTAGE")
+            )
+            
+            if collection.size().getInfo() == 0:
+                return None
+
+            # Verify actual pixel coverage over the analysis area before
+            # selecting an image. filterBounds only guarantees intersection
+            # with the (large) search region, not coverage of the (small)
+            # lake analysis box.
+            if coverage_geometry is not None:
+                total = collection.size().getInfo()
+                collection = self.filter_collection_covering(collection, coverage_geometry)
+                covering = collection.size().getInfo()
+                if covering == 0:
+                    print(f"  ✗ {total} candidate image(s) found but none covers the analysis area")
+                    return None
+                if covering < total:
+                    print(f"  ✓ Coverage filter: {covering}/{total} candidate image(s) cover the analysis area")
+            
+            image = collection.first()
+            metadata = image.getInfo()
+            self.last_image = image
+            self.last_metadata = metadata
+            
+            print(f"✓ Retrieved image from {metadata['properties']['system:index']}")
+            print(f"  Cloud cover: {metadata['properties']['CLOUDY_PIXEL_PERCENTAGE']}%")
+            
+            return image
+            
+        except Exception as e:
+            print(f"✗ Error in date range attempt: {e}")
             return None
     
     def download_image_data(self, image, region_geometry, scale=30):

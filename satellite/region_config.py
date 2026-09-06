@@ -36,6 +36,8 @@ HIMALAYAN_REGIONS = {
         "description": "Representative monitoring region for documented glacial lakes in the Langtang Valley.",
         "hazard_level": "HIGH",
         "reference": "ICIMOD Himalayan glacial lake inventories"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Regional center and analysis buffer; authoritative lake polygon not bundled"
     },
     
     # ========== NEPAL ==========
@@ -58,7 +60,14 @@ HIMALAYAN_REGIONS = {
         "area_sqkm": 1.5,
         "documented_glof_history": "Multiple small outbursts; potential for catastrophic failure",
         "population_at_risk": "Downstream communities in Rolwaling Valley and beyond",
+        "downstream_exposure": {
+            "population_at_risk": "Downstream communities in Rolwaling Valley and beyond",
+            "exposure_description": "Documented glacial lake risk affecting downstream communities in Rolwaling Valley and beyond.",
+            "reference": "UN GLOF monitoring database; WECS Nepal 1996 report; ICIMOD 2001"
+        },
         "reference": "UN GLOF monitoring database; WECS Nepal 1996 report; ICIMOD 2001"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "ICIMOD 2001 center reference; authoritative lake polygon not bundled"
     },
     
     "Imja_Tsho_Nepal": {
@@ -78,7 +87,14 @@ HIMALAYAN_REGIONS = {
         "area_sqkm": 0.8,
         "documented_glof_history": "Identified as dangerous in 1996 WECS assessment",
         "population_at_risk": "Everest trekking communities; downstream Sagarmatha region",
+        "downstream_exposure": {
+            "population_at_risk": "Everest trekking communities; downstream Sagarmatha region",
+            "exposure_description": "Identified as dangerous with downstream exposure reaching Everest trekking communities and Sagarmatha region populations.",
+            "reference": "WECS Nepal 1996; ICIMOD 2001; Khumbu Valley monitoring"
+        },
         "reference": "WECS Nepal 1996; ICIMOD 2001; Khumbu Valley monitoring"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "NASA Earth Observatory 2016 / ICIMOD center reference; authoritative lake polygon not bundled"
     },
     
     "Dig_Tsho_Nepal": {
@@ -98,7 +114,14 @@ HIMALAYAN_REGIONS = {
         "area_sqkm": 0.5,
         "documented_glof_history": "1985 GLOF event triggered detailed GLOF research globally",
         "population_at_risk": "Downstream communities in Dudh Kosi river valley",
+        "downstream_exposure": {
+            "population_at_risk": "Downstream communities in Dudh Kosi river valley",
+            "exposure_description": "Historic GLOF event documented with downstream exposure in the Dudh Kosi river valley.",
+            "reference": "Historic 1985 GLOF; Nepal disaster records"
+        },
         "reference": "Historic 1985 GLOF; Nepal disaster records"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Regional center and analysis buffer; authoritative lake polygon not bundled"
     },
     
     "Thulagi_Nepal": {
@@ -118,7 +141,14 @@ HIMALAYAN_REGIONS = {
         "area_sqkm": 0.3,
         "documented_glof_history": "Identified as potentially dangerous. 2011 BGR study concluded imminent catastrophic outburst unlikely.",
         "population_at_risk": "Upper Marsyangdi valley communities",
+        "downstream_exposure": {
+            "population_at_risk": "Upper Marsyangdi valley communities",
+            "exposure_description": "Potential downstream impact on Upper Marsyangdi valley communities documented in regional monitoring studies.",
+            "reference": "BGR/NLfB/GGA 2011 study; ICIMOD 2001"
+        },
         "reference": "BGR/NLfB/GGA 2011 study; ICIMOD 2001"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Regional center and analysis buffer; authoritative lake polygon not bundled"
     },
     
     # ========== BHUTAN ==========
@@ -141,7 +171,14 @@ HIMALAYAN_REGIONS = {
         "area_sqkm": 0.7,
         "documented_glof_history": "2001 emergency intervention to prevent catastrophic failure",
         "population_at_risk": "Pho Chu River valley; Punakha region downstream",
+        "downstream_exposure": {
+            "population_at_risk": "Pho Chu River valley; Punakha region downstream",
+            "exposure_description": "Emergency intervention and documented downstream risk to the Pho Chu River valley and Punakha region.",
+            "reference": "2001 emergency intervention; Bhutan GLOF study"
+        },
         "reference": "2001 emergency intervention; Bhutan GLOF study"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Bhutan GLOF study center reference; authoritative lake polygon not bundled"
     },
     
     "Raphstreng_Tsho_Bhutan": {
@@ -161,7 +198,14 @@ HIMALAYAN_REGIONS = {
         "area_sqkm": 0.6,
         "documented_glof_history": "Flash floods occur regularly in Bhutan valleys",
         "population_at_risk": "Thimphu valley; major population centers",
+        "downstream_exposure": {
+            "population_at_risk": "Thimphu valley; major population centers",
+            "exposure_description": "Regular valley flood activity with downstream exposure affecting Thimphu valley and major population centers.",
+            "reference": "Bhutan glacial hazards study; 2674 lakes inventory"
+        },
         "reference": "Bhutan glacial hazards study; 2674 lakes inventory"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Regional center and analysis buffer; authoritative lake polygon not bundled"
     },
     
     # ========== TIBET / CHINA ==========
@@ -184,7 +228,14 @@ HIMALAYAN_REGIONS = {
         "area_sqkm": 3.5,
         "documented_glof_history": "If GLOF occurs: 23 towns/villages endangered; 12,500+ people at risk",
         "population_at_risk": "23 towns and villages; significant population center in Tibet",
+        "downstream_exposure": {
+            "population_at_risk": "23 towns and villages; significant population center in Tibet",
+            "exposure_description": "Documented downstream risk to 23 towns and villages and a significant population center in Tibet if a GLOF occurs.",
+            "reference": "Tibet Hydrological Department 2006; Wang et al. 2008 study"
+        },
         "reference": "Tibet Hydrological Department 2006; Wang et al. 2008 study"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Wang et al. 2008 center reference; authoritative lake polygon not bundled"
     },
     
     "Shaksgam_Karakoram": {
@@ -204,7 +255,14 @@ HIMALAYAN_REGIONS = {
         "area_sqkm": 2.5,
         "documented_glof_history": "1929 GLOF: 1,200 km downstream impact on Indus River; 8.1 m flood rise at Attock",
         "population_at_risk": "Indus River downstream communities in Pakistan",
+        "downstream_exposure": {
+            "population_at_risk": "Indus River downstream communities in Pakistan",
+            "exposure_description": "Historical GLOF impact extending 1,200 km downstream along the Indus River to downstream communities in Pakistan.",
+            "reference": "Hewitt 1982; USGS historical records; Karakoram monitoring"
+        },
         "reference": "Hewitt 1982; USGS historical records; Karakoram monitoring"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Regional center and analysis buffer; authoritative lake polygon not bundled"
     },
     
     # ========== INDIA (HIMALAYAN STATES) ==========
@@ -226,7 +284,14 @@ HIMALAYAN_REGIONS = {
         "area_sqkm": 0.4,
         "documented_glof_history": "June 2013: GLOF caused thousands of deaths. Major disaster event.",
         "population_at_risk": "Kedarnath Valley; pilgrimage sites; major religious significance",
+        "downstream_exposure": {
+            "population_at_risk": "Kedarnath Valley; pilgrimage sites; major religious significance",
+            "exposure_description": "Major disaster event with downstream exposure affecting Kedarnath Valley, pilgrimage sites, and major religious significance areas.",
+            "reference": "2013 North India floods; India disaster records"
+        },
         "reference": "2013 North India floods; India disaster records"
+        ,"geometry_status": "APPROXIMATE"
+        ,"geometry_source": "Regional center and analysis buffer; authoritative lake polygon not bundled"
     }
 }
 
@@ -299,6 +364,113 @@ def get_region_bounds(region_key):
         }
     }
 
+def get_region_analysis_bounds(region_key):
+    region = HIMALAYAN_REGIONS.get(region_key)
+    if not region:
+        return None
+
+    # Use lake-specific coordinates for analysis where available from scientific literature.
+    # Keep the main region coordinates unchanged for Sentinel-2 search.
+    # Sources: ICIMOD studies, WECS Nepal reports, published glacial lake inventories
+    analysis_centers = {
+        "Tsho_Rolpa_Nepal": {
+            "latitude": 27.861,
+            "longitude": 86.476,
+            "buffer": 0.02,
+            "source": "ICIMOD 2001 glacial lake inventory"
+        },
+        "Imja_Tsho_Nepal": {
+            "latitude": 27.934,
+            "longitude": 86.926,
+            "buffer": 0.015,
+            "source": "NASA Earth Observatory 2016, ICIMOD monitoring"
+        },
+        "Thorthormi_Bhutan": {
+            "latitude": 27.833,
+            "longitude": 89.883,
+            "buffer": 0.015,
+            "source": "Bhutan GLOF study 2001, ICIMOD 2009"
+        },
+        "Longbasaba_Pida_Tibet": {
+            "latitude": 30.317,
+            "longitude": 90.467,
+            "buffer": 0.02,
+            "source": "Wang et al. 2008, Tibet Hydrological Department 2006"
+        }
+    }
+
+    if region_key in analysis_centers:
+        center = analysis_centers[region_key]
+        lat = center["latitude"]
+        lon = center["longitude"]
+        analysis_buffer = center["buffer"]
+        has_lake_specific_coords = True
+        coord_source = center["source"]
+    else:
+        lat = region["latitude"]
+        lon = region["longitude"]
+        analysis_buffer = 0.03
+        has_lake_specific_coords = False
+        coord_source = "Regional center point (not lake-specific)"
+
+    return {
+        "type": "Polygon",
+        "coordinates": [[
+            [lon - analysis_buffer, lat - analysis_buffer],
+            [lon + analysis_buffer, lat - analysis_buffer],
+            [lon + analysis_buffer, lat + analysis_buffer],
+            [lon - analysis_buffer, lat + analysis_buffer],
+            [lon - analysis_buffer, lat - analysis_buffer]
+        ]],
+        "properties": {
+            "has_lake_specific_coords": has_lake_specific_coords,
+            "coord_source": coord_source,
+            "analysis_buffer_degrees": analysis_buffer
+        }
+    }    
+
+
+def get_lake_geometry(region_key):
+    """Return the best configured geometry without upgrading its trust level."""
+    region = HIMALAYAN_REGIONS.get(region_key)
+    if not region:
+        return None, {"status": "UNKNOWN", "source": None, "geometry_type": "NONE"}
+
+    configured_geometry = region.get("lake_geometry")
+    if configured_geometry is not None:
+        return configured_geometry, {
+            "status": region.get("geometry_status", "UNKNOWN"),
+            "source": region.get("geometry_source"),
+            "geometry_type": "LAKE_POLYGON",
+        }
+
+    return get_region_analysis_bounds(region_key), {
+        "status": region.get("geometry_status", "UNKNOWN"),
+        "source": region.get("geometry_source"),
+        "geometry_type": "APPROXIMATE_ANALYSIS_ROI",
+    }
+
+
+def get_authoritative_reference(region_key):
+    """Return an optional trusted reference geometry without inventing one."""
+    region = HIMALAYAN_REGIONS.get(region_key)
+    if not region:
+        return None, {
+            "status": "UNAVAILABLE",
+            "trust_status": "UNTRUSTED",
+            "source": None,
+        }
+    geometry = region.get("authoritative_geometry")
+    metadata = region.get("authoritative_geometry_metadata")
+    if not isinstance(geometry, dict) or not isinstance(metadata, dict):
+        return None, {
+            "status": "UNAVAILABLE",
+            "trust_status": "UNTRUSTED",
+            "source": None,
+            "reason": "No verified authoritative reference geometry is configured",
+        }
+    return geometry, metadata
+
 def get_all_regions():
     """Return all available monitoring regions."""
     return HIMALAYAN_REGIONS
@@ -368,17 +540,19 @@ def get_monitoring_metadata():
     """
     
     regions = HIMALAYAN_REGIONS
+    numeric_population_values = [
+        region.get("population_at_risk")
+        for region in regions.values()
+        if isinstance(region.get("population_at_risk"), int)
+        and region.get("population_at_risk") >= 0
+    ]
     
     return {
         "total_regions": len(regions),
         "countries_covered": list(set(r["country"] for r in regions.values())),
         "critical_sites": len([r for r in regions.values() if r.get("hazard_level") == "CRITICAL"]),
         "high_risk_sites": len([r for r in regions.values() if r.get("hazard_level") == "HIGH"]),
-        "total_people_at_risk": sum(
-            int(r.get("population_at_risk", "0").split("+")[-1].replace(" ", ""))
-            for r in regions.values()
-            if isinstance(r.get("population_at_risk"), str)
-        ),
+        "total_people_at_risk": sum(numeric_population_values) if numeric_population_values else None,
         "reference_sources": [
             "UN GLOF monitoring database",
             "WECS Nepal reports",

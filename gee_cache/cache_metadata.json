@@ -1,0 +1,34 @@
+{
+  "7f54dcfb85acb7ae5bc50a3146ebcdf2": {
+    "region_key": "Tsho_Rolpa_Nepal",
+    "image_id": "20260811T045241_20260811T045240_T45RUL",
+    "band_config": "rgb",
+    "cached_at": "2026-09-04T17:24:45.583502",
+    "file_size_bytes": 125834,
+    "original_url": "https://earthengine.googleapis.com/v1/projects/g-alert-507210/thumbnails/23b9ef750afee4ad4916c33c90804775-0f2fa0de0c2bd5cfb307d89514ecb139:getPixels"
+  },
+  "579a8cf3bee8729abe71e0d2c4bb1239": {
+    "region_key": "Langtang_Nepal",
+    "image_id": "20260811T045241_20260811T045240_T45RUL",
+    "band_config": "rgb",
+    "cached_at": "2026-09-04T17:27:05.754090",
+    "file_size_bytes": 67015,
+    "original_url": "https://earthengine.googleapis.com/v1/projects/g-alert-507210/thumbnails/2fea4b054ef01e2e60b248262ef37069-34894bb6854ccd39193d476220ea391c:getPixels"
+  },
+  "1f9be8390008bdec192c6c8d39964b47": {
+    "region_key": "Imja_Tsho_Nepal",
+    "image_id": "20260620T044701_20260620T045103_T45RVM",
+    "band_config": "rgb",
+    "cached_at": "2026-09-04T17:27:48.676705",
+    "file_size_bytes": 148197,
+    "original_url": "https://earthengine.googleapis.com/v1/projects/g-alert-507210/thumbnails/718c81ceea922d52ea5e5e48aac5fba4-b3da70e654a4e7c63f36c3616967660c:getPixels"
+  },
+  "c1acfd5ceed38649ae32d26e05ac0d54": {
+    "region_key": "Tsho_Rolpa_Nepal",
+    "image_id": "20260526T044659_20260526T045305_T45RVL",
+    "band_config": "rgb",
+    "cached_at": "2026-09-04T19:42:24.191385",
+    "file_size_bytes": 503109,
+    "original_url": "https://earthengine.googleapis.com/v1/projects/g-alert-507210/thumbnails/0096925f22db102f2e91cc484830f0ad-d98b4404686289fbfd80a51f5a140fc6:getPixels"
+  }
+}

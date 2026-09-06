@@ -5,11 +5,38 @@ __pycache__/
 venv/
 env/
 
+# Environment variables and credentials
 .env
+.env.*
+credentials.json
+service-account.json
+gee-credentials.json
+gee-credentials*.json
+gee_credentials*.json
+gee-service-account*.json
+*earthengine*credentials*.json
+twilio*.json
+twilio*.env
+twilio*.ini
+twilio*.yaml
+twilio*.yml
+.twilio/
+*.pem
+*.key
 
+# Images and AI models
 *.png
-
 yolov8n.pt
 
+# VS Code
 .vscode/
+
+# Logs
 *.log
+
+# Runtime databases
+g_alert_observations.sqlite3
+gee_cache/*.sqlite3
+
+# Optional Python databases
+*.sqlite3

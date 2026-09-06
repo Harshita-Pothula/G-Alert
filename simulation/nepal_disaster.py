@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import List, Dict, Any
 
+from risk_engine import RiskEngine
+
 
 class DisasterPhase(Enum):
     """Phases of disaster progression."""
@@ -50,6 +52,50 @@ class NepalDisasterScenario:
         self.current_timestamp = self.start_datetime
         self.event_sequence = self._generate_event_sequence()
         self.current_event_index = 0
+        self.risk_engine = RiskEngine()
+
+    def _normalize_sensor_signal(self, event):
+        """Convert simulated vibration/water readings to a 0-1 sensor risk signal."""
+
+        vibration = float(event["vibration_cmps"])
+        water_level = float(event["water_level_cm"])
+
+        vibration_signal = min(1.0, vibration / 60.0)
+        water_signal = min(1.0, max(0.0, (water_level - 120.0) / 200.0))
+        sensor_signal = (0.7 * vibration_signal) + (0.3 * water_signal)
+        return round(min(1.0, sensor_signal), 4)
+
+    def _assess_event_with_risk_engine(self, event):
+        """Pass the event's simulated signals into the shared RiskEngine."""
+
+        satellite_signal = float(self._estimate_ndwi(event))
+        ai_signal = float(self._estimate_ai_anomaly(event))
+        sensor_signal = self._normalize_sensor_signal(event)
+
+        assessment = self.risk_engine.assess_risk(
+            satellite_signal=satellite_signal,
+            ai_signal=ai_signal,
+            sensor_signal=sensor_signal,
+            region="Nepal",
+            evidence={
+                "explanation_sources": {
+                    "satellite": {"status": "SIMULATED", "simulated": True},
+                    "weather": {"status": "UNAVAILABLE"},
+                    "sensor": {"status": "SIMULATED", "simulated": True},
+                    "ai": {"status": "SIMULATED", "simulated": True},
+                },
+            },
+        )
+
+        # Keep scripted event["risk_level"] / event["risk_score"] as placeholders.
+        # Displayed classification comes only from this RiskEngine assessment.
+        event["risk_assessment"] = assessment
+        event["risk_explanation"] = assessment["explanation"]
+        event["risk_action"] = assessment["action"]
+        if self.risk_engine.history:
+            self.risk_engine.history[-1]["simulation_phase"] = event["phase"].value
+
+        return assessment
     
     def _generate_event_sequence(self):
         """Generate the sequence of disaster events."""
@@ -81,7 +127,7 @@ class NepalDisasterScenario:
             {
                 "phase": DisasterPhase.HIGH_ALERT,
                 "hours_from_start": 4,
-                "event": "Increasing vibration intensity. Water level rising. Possible GLOF conditions forming.",
+                "event": "Increasing vibration intensity and water level. Simulated hazard indicators are rising.",
                 "vibration_cmps": 18.5,
                 "water_level_cm": 165,
                 "risk_level": "WARNING",
@@ -92,7 +138,7 @@ class NepalDisasterScenario:
             {
                 "phase": DisasterPhase.CRITICAL,
                 "hours_from_start": 6,
-                "event": "CRITICAL: Strong vibrations + rapid water level rise. GLOF imminent.",
+                "event": "CRITICAL: Strong vibrations and rapid water level rise. Simulated critical escalation requiring emergency-warning workflow.",
                 "vibration_cmps": 35.0,
                 "water_level_cm": 195,
                 "risk_level": "HIGH_RISK",
@@ -103,7 +149,7 @@ class NepalDisasterScenario:
             {
                 "phase": DisasterPhase.INCIDENT,
                 "hours_from_start": 8,
-                "event": "INCIDENT DECLARED: Glacial Lake Outburst Flood in progress. Flash flood detected.",
+                "event": "INCIDENT: Simulated extreme conditions for emergency-response demonstration.",
                 "vibration_cmps": 55.0,
                 "water_level_cm": 280,
                 "risk_level": "CRITICAL",
@@ -160,6 +206,8 @@ class NepalDisasterScenario:
         
         if event is None:
             return None
+
+        assessment = self._assess_event_with_risk_engine(event)
         
         telemetry = {
             "scenario": "Nepal_Aug26_2026_FlashFlood",
@@ -171,27 +219,37 @@ class NepalDisasterScenario:
             "sensors": {
                 "vibration_cmps": event["vibration_cmps"],
                 "water_level_cm": event["water_level_cm"],
-                "note": "Simulated sensor data - NOT real measurements"
+                "note": "Simulated sensor data - NOT real measurements",
+                "simulated": True,
+                "status": "simulated"
             },
             
             # Risk assessment
-            "risk_level": event["risk_level"],
-            "risk_score": event["risk_score"],
+            "risk_level": assessment["risk_level"],
+            "risk_score": assessment["risk_score"],
+            "risk_explanation": assessment["explanation"],
+            "risk_action": assessment["action"],
+            "engine_assessment": assessment,
             
             # Satellite observation (if available)
             "satellite_observation": {
                 "lake_area_sqkm": self._estimate_lake_area(event),
-                "ndwi_value": self._estimate_ndwi(event)
+                "ndwi_value": self._estimate_ndwi(event),
+                "simulated": True,
+                "status": "simulated"
             },
             
             # AI detection (if available)
             "ai_detection": {
-                "anomaly_score": self._estimate_ai_anomaly(event)
+                "anomaly_score": self._estimate_ai_anomaly(event),
+                "simulated": True,
+                "status": "simulated"
             },
             
             # Source
             "source": "simulation",
-            "warning": "All data is SIMULATED for hackathon demonstration purposes"
+            "warning": "All data is SIMULATED for hackathon demonstration purposes",
+            "simulated": True
         }
         
         return telemetry
